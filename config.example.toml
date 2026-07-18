@@ -1,0 +1,14 @@
+# API endpoint used for queries.
+url = "http://localhost:8080"
+
+# Web UI base used by the `o` key.
+web_url = "http://localhost:5173"
+
+# Prefer RUSH_API_KEY in the environment for shared machines.
+# api_key = "replace-me"
+
+tenant = "default"
+poll_interval_ms = 1000
+window_seconds = 300
+buffer_size = 5000
+
