@@ -1,4 +1,4 @@
-# rush-cli
+# Rush CLI
 
 `rush` is a Rust terminal client for live Rush telemetry. It tails logs or APM
 spans, applies server-side searches and structured filters, lets you freeze the
@@ -25,10 +25,12 @@ time window. It does not require a new streaming endpoint in `query-api`.
 ## Install
 
 ```bash
-cargo install --path .
+cargo install --git https://github.com/RushObservability/cli.git
 ```
 
 This installs the `rush` binary.
+
+For local development from a checkout, use `cargo install --path .`.
 
 ### Releases
 
