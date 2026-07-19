@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 use tokio::sync::watch;
 
-use crate::model::{Filter, QuerySpec, TailRecord};
+use crate::model::{Filter, QuerySpec, TailRecord, parse_search_input};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -31,9 +31,11 @@ pub struct App {
     pub new_count: usize,
     pub input_mode: InputMode,
     pub input: String,
+    /// Byte offset into `input`, always kept on a UTF-8 character boundary.
+    pub input_cursor: usize,
     pub show_detail: bool,
     pub show_help: bool,
-    pub wrap: bool,
+    pub stream_wrap: bool,
     pub error: Option<String>,
     pub last_updated: Option<DateTime<Utc>>,
     pub web_url: String,
@@ -60,9 +62,10 @@ impl App {
             new_count: 0,
             input_mode: InputMode::Normal,
             input: String::new(),
+            input_cursor: 0,
             show_detail: false,
             show_help: false,
-            wrap: false,
+            stream_wrap: false,
             error: None,
             last_updated: None,
             web_url,
@@ -146,12 +149,19 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.input_mode = InputMode::Search;
-                self.input = self.spec.search.clone();
+                self.input = self.spec.search_input();
+                self.input_cursor = self.input.len();
                 Action::None
             }
             KeyCode::Char('f') => {
                 self.input_mode = InputMode::Filter;
-                self.input.clear();
+                self.input = self
+                    .spec
+                    .filters
+                    .last()
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                self.input_cursor = self.input.len();
                 Action::None
             }
             KeyCode::Char('x') => {
@@ -174,7 +184,7 @@ impl App {
                 Action::None
             }
             KeyCode::Char('w') => {
-                self.wrap = !self.wrap;
+                self.stream_wrap = !self.stream_wrap;
                 Action::None
             }
             KeyCode::Enter => {
@@ -217,21 +227,42 @@ impl App {
     }
 
     fn handle_input_key(&mut self, key: KeyEvent) -> Action {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('a') => self.input_cursor = 0,
+                KeyCode::Char('e') => self.input_cursor = self.input.len(),
+                KeyCode::Char('u') => {
+                    self.input.drain(..self.input_cursor);
+                    self.input_cursor = 0;
+                }
+                KeyCode::Char('k') => self.input.truncate(self.input_cursor),
+                _ => {}
+            }
+            return Action::None;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
                 self.input.clear();
+                self.input_cursor = 0;
             }
             KeyCode::Enter => {
                 match self.input_mode {
                     InputMode::Search => {
-                        self.spec.search = self.input.trim().to_string();
+                        let (filters, search) = parse_search_input(&self.input);
+                        self.spec.filters = filters;
+                        self.spec.search = search;
                         self.error = None;
                         self.query_changed();
                     }
                     InputMode::Filter => match self.input.parse::<Filter>() {
                         Ok(filter) => {
-                            self.spec.filters.push(filter);
+                            if let Some(existing) = self.spec.filters.last_mut() {
+                                *existing = filter;
+                            } else {
+                                self.spec.filters.push(filter);
+                            }
                             self.error = None;
                             self.query_changed();
                         }
@@ -241,14 +272,48 @@ impl App {
                 }
                 self.input_mode = InputMode::Normal;
                 self.input.clear();
+                self.input_cursor = 0;
             }
             KeyCode::Backspace => {
-                self.input.pop();
+                let previous = self.previous_char_boundary();
+                self.input.replace_range(previous..self.input_cursor, "");
+                self.input_cursor = previous;
             }
-            KeyCode::Char(character) => self.input.push(character),
+            KeyCode::Delete => {
+                let next = self.next_char_boundary();
+                self.input.replace_range(self.input_cursor..next, "");
+            }
+            KeyCode::Left => {
+                self.input_cursor = self.previous_char_boundary();
+            }
+            KeyCode::Right => {
+                self.input_cursor = self.next_char_boundary();
+            }
+            KeyCode::Home => self.input_cursor = 0,
+            KeyCode::End => self.input_cursor = self.input.len(),
+            KeyCode::Char(character) => {
+                self.input.insert(self.input_cursor, character);
+                self.input_cursor += character.len_utf8();
+            }
             _ => {}
         }
         Action::None
+    }
+
+    fn previous_char_boundary(&self) -> usize {
+        self.input[..self.input_cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    fn next_char_boundary(&self) -> usize {
+        self.input[self.input_cursor..]
+            .chars()
+            .next()
+            .map(|character| self.input_cursor + character.len_utf8())
+            .unwrap_or(self.input.len())
     }
 
     fn toggle_pause(&mut self) {
@@ -373,5 +438,101 @@ mod tests {
             rows.iter().map(|row| row.timestamp_ns).collect::<Vec<_>>(),
             vec![3, 2, 1]
         );
+    }
+
+    #[test]
+    fn search_can_be_edited_at_the_cursor() {
+        let mut app = app();
+        app.spec.search = "timeout".into();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+
+        assert_eq!(app.input, "timeo-t");
+        assert_eq!(app.input_cursor, 6);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.spec.search, "timeo-t");
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn filter_key_edits_the_last_filter_instead_of_appending() {
+        let mut app = app();
+        app.spec.filters = vec![
+            "service_name=gateway".parse().unwrap(),
+            "severity=ERROR".parse().unwrap(),
+        ];
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+
+        assert_eq!(app.input, "severity=ERROR");
+        assert_eq!(app.input_cursor, app.input.len());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for character in "severity=WARN".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.spec.filters.len(), 2);
+        assert_eq!(app.spec.filters[0].to_string(), "service_name=gateway");
+        assert_eq!(app.spec.filters[1].to_string(), "severity=WARN");
+    }
+
+    #[test]
+    fn filter_key_creates_a_filter_when_none_exists() {
+        let mut app = app();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.input.is_empty());
+
+        for character in "service_name=gateway".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.spec.filters.len(), 1);
+        assert_eq!(app.spec.filters[0].to_string(), "service_name=gateway");
+    }
+
+    #[test]
+    fn search_editor_applies_web_style_filters_and_text_together() {
+        let mut app = app();
+        app.spec.filters = vec!["service_name=articles".parse().unwrap()];
+        app.spec.search = "GET".into();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert_eq!(app.input, "service_name=articles GET");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for character in "service_name=gateway POST".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.spec.filters.len(), 1);
+        assert_eq!(app.spec.filters[0].to_string(), "service_name=gateway");
+        assert_eq!(app.spec.search, "POST");
+    }
+
+    #[test]
+    fn input_editing_keeps_cursor_on_unicode_boundaries() {
+        let mut app = app();
+        app.input_mode = InputMode::Search;
+        app.input = "api 🚨 down".into();
+        app.input_cursor = app.input.len();
+
+        for _ in 0..5 {
+            app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('⚠'), KeyModifiers::NONE));
+
+        assert_eq!(app.input, "api ⚠ down");
+        assert!(app.input.is_char_boundary(app.input_cursor));
     }
 }

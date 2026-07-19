@@ -22,7 +22,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures_util::StreamExt;
-use model::{Filter, QuerySpec, TailRecord};
+use model::{Filter, QuerySpec, TailRecord, parse_search_input};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::{mpsc, watch};
 
@@ -51,14 +51,20 @@ async fn main() -> Result<()> {
 
 async fn run_tail(cli: &Cli, tail: &TailArgs) -> Result<()> {
     let config = config::Config::load(cli, tail)?;
-    let filters = tail
+    let mut filters = tail
         .filters
         .iter()
         .map(|value| value.parse::<Filter>())
         .collect::<Result<Vec<_>>>()?;
+    let (search_filters, search) = tail
+        .search
+        .as_deref()
+        .map(parse_search_input)
+        .unwrap_or_default();
+    filters.extend(search_filters);
     let spec = QuerySpec {
         signal: tail.signal,
-        search: tail.search.clone().unwrap_or_default(),
+        search,
         filters,
         window: Duration::from_secs(config.window_seconds),
         limit: tail.limit,
