@@ -26,6 +26,7 @@ thiserror = "2.0"
 tokio = { version = "1.44", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
 url = "2.5"
+unicode-width = "0.2"
 
 [dev-dependencies]
 httpmock = "0.7"
@@ -34,4 +35,3 @@ tempfile = "3.19"
 [profile.release]
 lto = "thin"
 strip = true
-

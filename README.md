@@ -30,6 +30,19 @@ cargo install --path .
 
 This installs the `rush` binary.
 
+### Releases
+
+Pushing a version tag builds release archives for Linux x86_64, macOS Intel,
+macOS Apple Silicon, and Windows x86_64, then publishes them with SHA-256
+checksums to a GitHub Release. The tag must match the package version in
+`Cargo.toml`.
+
+```bash
+# Cargo.toml version = "0.1.0"
+git tag -a v0.1.0 -m "rush v0.1.0"
+git push origin v0.1.0
+```
+
 ## Authentication
 
 Create an API key in **Rush → Settings → API Keys**, then export it. Environment
@@ -81,6 +94,15 @@ Stream NDJSON into another command:
 rush tail logs --output json --search panic | jq -r '.summary'
 ```
 
+Use the same combined search syntax as the Rush Explore page:
+
+```bash
+rush tail logs --search 'service_name=gateway POST'
+```
+
+This sends `service_name=gateway` as a structured filter and searches the
+remaining log text for `POST`.
+
 Run `rush tail --help` for polling, buffer, and time-window options.
 
 ### Filter syntax
@@ -99,18 +121,26 @@ include `service_name`, `span_name`, `http_method`, `http_path`,
 | --- | --- |
 | `Space` | Pause/resume the visible stream; polling continues into a buffer |
 | `Tab` | Switch between logs and APM |
-| `/` | Edit free-text search |
-| `f` | Add a structured field filter |
+| `/` | Edit combined structured filters and free-text search |
+| `f` | Edit the most recent structured field filter; creates one when none exists |
 | `x` | Remove the last field filter |
 | `c` | Clear search and filters |
 | `r` | Refresh now |
 | `j` / `k` | Move selection |
 | `g` / `G` | Jump to newest/oldest |
 | `Enter` | Toggle record context |
-| `w` | Toggle context word wrapping |
+| `w` | Toggle main-stream message wrapping (up to three lines per row) |
 | `o` | Open selected context in the Rush web UI |
 | `?` | Show keyboard help |
 | `q` | Quit |
+
+While editing a search or filter, use `Left` / `Right` to move the cursor,
+`Home` / `End` to jump, and `Backspace` / `Delete` to edit. `Enter` applies the
+new value and `Esc` cancels it. The editor also supports `Ctrl-A`, `Ctrl-E`,
+`Ctrl-U`, and `Ctrl-K`.
+
+Selected-record details always word-wrap. Main-stream rows stay compact by
+default; press `w` when you want to expand messages in place.
 
 ## Configuration
 

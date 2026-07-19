@@ -45,7 +45,13 @@ impl fmt::Display for Filter {
         let value = self
             .value
             .as_str()
-            .map(str::to_string)
+            .map(|value| {
+                if value.chars().any(char::is_whitespace) {
+                    format!("\"{value}\"")
+                } else {
+                    value.to_string()
+                }
+            })
             .unwrap_or_else(|| self.value.to_string());
         write!(f, "{}{}{}", self.field, self.op, value)
     }
@@ -79,6 +85,15 @@ impl FromStr for Filter {
 }
 
 fn parse_value(raw: &str) -> Value {
+    let raw = if raw.len() >= 2
+        && ((raw.starts_with('"') && raw.ends_with('"'))
+            || (raw.starts_with('\'') && raw.ends_with('\'')))
+    {
+        &raw[1..raw.len() - 1]
+    } else {
+        raw
+    };
+
     if raw.eq_ignore_ascii_case("true") {
         Value::Bool(true)
     } else if raw.eq_ignore_ascii_case("false") {
@@ -86,7 +101,7 @@ fn parse_value(raw: &str) -> Value {
     } else if let Ok(number) = raw.parse::<i64>() {
         Value::Number(number.into())
     } else {
-        Value::String(raw.trim_matches('"').to_string())
+        Value::String(raw.to_string())
     }
 }
 
@@ -97,6 +112,72 @@ pub struct QuerySpec {
     pub filters: Vec<Filter>,
     pub window: Duration,
     pub limit: u16,
+}
+
+impl QuerySpec {
+    /// Render the combined filter + free-text syntax used by the web Explore bar.
+    pub fn search_input(&self) -> String {
+        self.filters
+            .iter()
+            .map(ToString::to_string)
+            .chain((!self.search.is_empty()).then(|| self.search.clone()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// Split the web Explore search syntax into structured filters and free text.
+///
+/// Unquoted `field=value` tokens become filters. Quoted phrases, boolean
+/// keywords, and all other tokens remain in the free-text search expression.
+pub fn parse_search_input(input: &str) -> (Vec<Filter>, String) {
+    let mut filters = Vec::new();
+    let mut text = Vec::new();
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((start, character)) = chars.next() {
+        if character.is_whitespace() {
+            continue;
+        }
+
+        if character == '"' {
+            let mut end = input.len();
+            for (index, next) in chars.by_ref() {
+                end = index + next.len_utf8();
+                if next == '"' {
+                    break;
+                }
+            }
+            text.push(input[start..end].to_string());
+            continue;
+        }
+
+        let mut end = start + character.len_utf8();
+        let mut quote = None;
+        while let Some(&(index, next)) = chars.peek() {
+            if quote.is_none() && next.is_whitespace() {
+                break;
+            }
+            chars.next();
+            end = index + next.len_utf8();
+            match quote {
+                Some(open) if next == open => quote = None,
+                None if next == '"' || next == '\'' => quote = Some(next),
+                _ => {}
+            }
+        }
+
+        let token = &input[start..end];
+        if token.eq_ignore_ascii_case("AND") || token.eq_ignore_ascii_case("OR") {
+            text.push(token.to_string());
+        } else if let Ok(filter) = token.parse::<Filter>() {
+            filters.push(filter);
+        } else {
+            text.push(token.to_string());
+        }
+    }
+
+    (filters, text.join(" "))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +252,45 @@ mod tests {
         let contains = "service_name~gate".parse::<Filter>().unwrap();
         assert_eq!(contains.op, "LIKE");
         assert_eq!(contains.value, Value::from("%gate%"));
+    }
+
+    #[test]
+    fn parses_web_style_filters_and_free_text() {
+        let (filters, search) = parse_search_input("service_name=gateway POST");
+
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].to_string(), "service_name=gateway");
+        assert_eq!(search, "POST");
+    }
+
+    #[test]
+    fn mixed_search_preserves_quotes_and_boolean_keywords() {
+        let (filters, search) = parse_search_input(
+            "service_name='api gateway' http_status_code>=500 \"request failed\" OR timeout",
+        );
+
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0].value, Value::String("api gateway".into()));
+        assert_eq!(filters[1].value, Value::Number(500.into()));
+        assert_eq!(search, "\"request failed\" OR timeout");
+    }
+
+    #[test]
+    fn combined_search_round_trips_filter_values_with_spaces() {
+        let spec = QuerySpec {
+            signal: Signal::Logs,
+            search: "POST".into(),
+            filters: vec!["service_name='api gateway'".parse().unwrap()],
+            window: Duration::from_secs(60),
+            limit: 100,
+        };
+
+        let input = spec.search_input();
+        let (filters, search) = parse_search_input(&input);
+
+        assert_eq!(input, "service_name=\"api gateway\" POST");
+        assert_eq!(filters, spec.filters);
+        assert_eq!(search, "POST");
     }
 
     #[test]

@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, InputMode},
@@ -146,22 +147,31 @@ fn draw_content(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     };
     draw_table(frame, regions[0], app);
     if app.show_detail {
-        draw_detail(frame, regions[1], app.selected(), app.wrap);
+        draw_detail(frame, regions[1], app.selected());
     }
 }
 
 fn draw_table(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let message_width = usize::from(area.width.saturating_sub(60)).max(1);
     let rows = app.records.iter().map(|record| {
         let level_style = level_style(&record.level);
+        let messages = if app.stream_wrap {
+            wrap_message(&record.summary, message_width, 3)
+        } else {
+            vec![record.summary.replace('\n', " ")]
+        };
+        let row_height = messages.len() as u16;
         Row::new(vec![
             Cell::from(record.timestamp()).style(Style::default().fg(MUTED)),
             Cell::from(record.level.to_uppercase()).style(level_style),
             Cell::from(record.service.clone()).style(Style::default().fg(BLUE)),
-            Cell::from(record.summary.replace('\n', " ")),
+            Cell::from(messages.join("\n")),
             Cell::from(record.duration_ns.map(format_duration).unwrap_or_default())
                 .style(Style::default().fg(MUTED)),
         ])
+        .height(row_height)
     });
+    let wrap_status = if app.stream_wrap { "on" } else { "off" };
     let table = Table::new(
         rows,
         [
@@ -180,7 +190,7 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" stream ")
+            .title(format!(" stream · wrap {wrap_status} "))
             .border_style(Style::default().fg(Color::DarkGray)),
     )
     .row_highlight_style(
@@ -192,7 +202,7 @@ fn draw_table(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
-fn draw_detail(frame: &mut Frame<'_>, area: Rect, selected: Option<&TailRecord>, wrap: bool) {
+fn draw_detail(frame: &mut Frame<'_>, area: Rect, selected: Option<&TailRecord>) {
     let text = match selected {
         Some(record) => Text::from(vec![
             detail_line("signal", record.signal.to_string()),
@@ -229,51 +239,90 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, selected: Option<&TailRecord>,
         ]),
         None => Text::from("No row selected"),
     };
-    let mut paragraph = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" context ")
-            .border_style(Style::default().fg(AMBER)),
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" context · message wraps ")
+                    .border_style(Style::default().fg(AMBER)),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
     );
-    if wrap {
-        paragraph = paragraph.wrap(Wrap { trim: false });
-    }
-    frame.render_widget(paragraph, area);
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if app.input_mode != InputMode::Normal {
         let label = if app.input_mode == InputMode::Search {
-            "search"
+            "SEARCH — filters + text"
         } else {
-            "filter"
+            "FILTER — edit current"
         };
-        let hint = if app.input_mode == InputMode::Filter {
-            "  e.g. service_name=gateway"
+        let placeholder = if app.input_mode == InputMode::Filter {
+            "e.g. service_name=gateway"
         } else {
-            ""
+            "e.g. service_name=gateway POST"
         };
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" {label} "))
+            .title(format!(" {label} · Enter apply · Esc cancel "))
             .border_style(Style::default().fg(AMBER));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let cursor_width = UnicodeWidthStr::width(&app.input[..app.input_cursor]);
+        let viewport_width = usize::from(inner.width);
+        let scroll = cursor_width.saturating_sub(viewport_width.saturating_sub(1));
+        let text = if app.input.is_empty() {
+            Line::styled(placeholder, Style::default().fg(MUTED))
+        } else {
+            Line::raw(app.input.as_str())
+        };
         frame.render_widget(
-            Paragraph::new(format!("{}{}", app.input, hint)).block(block),
-            area,
+            Paragraph::new(text).scroll((0, scroll.min(usize::from(u16::MAX)) as u16)),
+            inner,
         );
-        frame.set_cursor_position((area.x + 1 + app.input.len() as u16, area.y + 1));
+        let cursor_column = cursor_width
+            .saturating_sub(scroll)
+            .min(viewport_width.saturating_sub(1));
+        frame.set_cursor_position((inner.x + cursor_column as u16, inner.y));
         return;
     }
-    let message = app.error.as_deref().unwrap_or(
-        "space pause  / search  f filter  Tab logs/APM  Enter details  o web  ? help  q quit",
-    );
-    let color = if app.error.is_some() {
-        Color::Red
-    } else {
-        MUTED
-    };
+    if let Some(error) = app.error.as_deref() {
+        frame.render_widget(
+            Paragraph::new(error).style(Style::default().fg(Color::Red)),
+            area,
+        );
+        return;
+    }
+
+    let primary_key = Style::default().fg(AMBER).add_modifier(Modifier::BOLD);
+    let primary_action = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let secondary_key = Style::default().fg(BLUE);
+    let secondary_action = Style::default().fg(MUTED);
     frame.render_widget(
-        Paragraph::new(message).style(Style::default().fg(color)),
+        Paragraph::new(Line::from(vec![
+            Span::styled("[/]", primary_key),
+            Span::styled(" Edit search", primary_action),
+            Span::raw("   "),
+            Span::styled("[f]", primary_key),
+            Span::styled(" Edit filter", primary_action),
+            Span::raw("   "),
+            Span::styled("[Space]", secondary_key),
+            Span::styled(" Pause", secondary_action),
+            Span::raw("   "),
+            Span::styled("[w]", secondary_key),
+            Span::styled(" Wrap", secondary_action),
+            Span::raw("   "),
+            Span::styled("[Enter]", secondary_key),
+            Span::styled(" Details", secondary_action),
+            Span::raw("   "),
+            Span::styled("[?]", secondary_key),
+            Span::styled(" All keys", secondary_action),
+        ])),
         area,
     );
 }
@@ -288,15 +337,16 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         Line::raw(""),
         Line::raw("space    pause/resume (polling continues into a buffer)"),
         Line::raw("Tab      switch logs/APM"),
-        Line::raw("/        edit server-side free-text search"),
-        Line::raw("f        add field filter (field=value, !=, >=, <=, >, <, ~)"),
+        Line::raw("/        edit filters + free text (service_name=gateway POST)"),
+        Line::raw("         ←/→ move  Home/End jump  Backspace/Delete edit"),
+        Line::raw("f        edit last field filter (creates one when empty)"),
         Line::raw("x        remove the last field filter"),
         Line::raw("c        clear search and filters"),
         Line::raw("r        refresh immediately"),
         Line::raw("j/k      move selection"),
         Line::raw("g/G      newest/oldest row"),
         Line::raw("Enter    toggle selected-row details"),
-        Line::raw("w        toggle detail word wrapping"),
+        Line::raw("w        toggle main stream message wrapping (up to 3 lines)"),
         Line::raw("o        open selected trace/log context in Rush web"),
         Line::raw("q        quit"),
         Line::raw(""),
@@ -334,6 +384,65 @@ fn format_duration(duration_ns: u64) -> String {
     } else {
         format!("{duration_ns}ns")
     }
+}
+
+fn wrap_message(message: &str, width: usize, max_lines: usize) -> Vec<String> {
+    if width == 0 || max_lines == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut line_width = 0;
+    let mut truncated = false;
+
+    for character in message.chars() {
+        if character == '\n' {
+            if !line.is_empty() {
+                lines.push(line.trim_end().to_string());
+                line.clear();
+                line_width = 0;
+            }
+            if lines.len() == max_lines {
+                truncated = true;
+                break;
+            }
+            continue;
+        }
+
+        let character_width = character.width().unwrap_or(0);
+        if line_width > 0 && line_width + character_width > width {
+            lines.push(line.trim_end().to_string());
+            line.clear();
+            line_width = 0;
+            if lines.len() == max_lines {
+                truncated = true;
+                break;
+            }
+        }
+        if line.is_empty() && character.is_whitespace() {
+            continue;
+        }
+        line.push(character);
+        line_width += character_width;
+    }
+
+    if !line.is_empty() && lines.len() < max_lines {
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    if truncated {
+        let last = lines
+            .last_mut()
+            .expect("wrapped messages always have a line");
+        while UnicodeWidthStr::width(last.as_str()) >= width && !last.is_empty() {
+            last.pop();
+        }
+        last.push('…');
+    }
+    lines
 }
 
 fn level_style(level: &str) -> Style {
@@ -412,5 +521,16 @@ mod tests {
         assert!(rendered.contains("RUSH"));
         assert!(rendered.contains("LIVE"));
         assert!(rendered.contains("service_name=gateway"));
+        assert!(rendered.contains("[/] Edit search"));
+        assert!(rendered.contains("[f] Edit filter"));
+    }
+
+    #[test]
+    fn wraps_stream_messages_and_caps_the_row_height() {
+        assert_eq!(
+            wrap_message("request failed while calling upstream", 10, 3),
+            vec!["request fa", "iled while", "calling u…"]
+        );
+        assert_eq!(wrap_message("short", 10, 3), vec!["short"]);
     }
 }
