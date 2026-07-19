@@ -189,9 +189,17 @@ endpoint could reduce polling overhead without changing the TUI model.
 
 ## Development
 
+Run the complete local pull-request gate:
+
 ```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-cargo build --release
+make ci
+```
+
+Useful targets include `make test`, `make lint`, `make build`, `make release`,
+and `make install`. Run `make help` for the complete list. To start the TUI
+through Cargo, use `make run-logs` or `make run-apm`; pass CLI options with
+`ARGS`, for example:
+
+```bash
+make run-logs ARGS="--search 'service_name=gateway POST'"
 ```
