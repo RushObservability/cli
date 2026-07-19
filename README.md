@@ -45,6 +45,9 @@ git tag -a v0.1.0 -m "rush v0.1.0"
 git push origin v0.1.0
 ```
 
+To retry an existing tag without moving it, run
+`gh workflow run release.yml --ref main -f tag=v0.1.0`.
+
 ## Authentication
 
 Create an API key in **Rush → Settings → API Keys**, then export it. Environment
