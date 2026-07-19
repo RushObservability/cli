@@ -102,7 +102,7 @@ jobs:
           Compress-Archive -Path "dist/$package/*" -DestinationPath "dist/$package.zip"
 
       - name: Upload packaged binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rush-${{ matrix.target }}
           path: |
@@ -122,7 +122,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
       - name: Download packaged binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
