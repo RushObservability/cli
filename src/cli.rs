@@ -39,6 +39,55 @@ pub struct Cli {
 pub enum Command {
     /// Follow recent telemetry in an interactive TUI or newline-delimited JSON.
     Tail(TailArgs),
+
+    /// Configure standard kubectl access through a Rush gateway.
+    Kubernetes(KubernetesArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct KubernetesArgs {
+    #[command(subcommand)]
+    pub command: KubernetesCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum KubernetesCommand {
+    /// Print a kubeconfig that routes one cluster through the Rush gateway.
+    Kubeconfig(KubeconfigArgs),
+
+    /// Return credentials for a generated kubeconfig.
+    #[command(hide = true)]
+    Credential(CredentialArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct KubeconfigArgs {
+    /// Rush cluster identifier.
+    #[arg(long)]
+    pub cluster: String,
+
+    /// Full Kubernetes API URL exposed by the Rush gateway.
+    #[arg(long)]
+    pub gateway_url: Option<String>,
+
+    /// Context name written to the kubeconfig.
+    #[arg(long)]
+    pub context: Option<String>,
+
+    /// Default namespace written to the context.
+    #[arg(long)]
+    pub namespace: Option<String>,
+
+    /// Skip verification of the gateway TLS certificate.
+    #[arg(long)]
+    pub insecure_skip_tls_verify: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CredentialArgs {
+    /// Rush cluster identifier.
+    #[arg(long)]
+    pub cluster: String,
 }
 
 #[derive(Debug, Clone, Args)]

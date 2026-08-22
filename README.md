@@ -110,6 +110,36 @@ remaining log text for `POST`.
 
 Run `rush tail --help` for polling, buffer, and time-window options.
 
+### Configure Kubernetes gateway access
+
+Generate a kubeconfig that points standard `kubectl` at the Rush Kubernetes
+access gateway:
+
+```bash
+export RUSH_KUBERNETES_GATEWAY_URL='https://kubernetes.rush.example.com/clusters/prod-us-east-1'
+export RUSH_API_KEY='your-api-key'
+
+rush kubernetes kubeconfig \
+  --cluster prod-us-east-1 \
+  --namespace payments > ~/.kube/rush-prod
+
+KUBECONFIG=~/.kube/rush-prod kubectl get pods
+```
+
+The generated file uses Kubernetes' exec-credential protocol. It runs
+`rush kubernetes credential` when `kubectl` needs a token, so the kubeconfig
+does not contain the Rush API key. The gateway sees the original Kubernetes API
+request and handles recording without changing `kubectl` stdout, stderr, stdin,
+TTY behavior, or exit codes.
+
+Use `--gateway-url` instead of `RUSH_KUBERNETES_GATEWAY_URL` when generating
+configs for several clusters. If you pass `rush --config <path>`, the generated
+exec-credential arguments retain that path.
+
+Gateway URLs must use HTTPS. Plain HTTP is accepted only for `localhost` and
+loopback IPs during local development because the exec credential sends your
+Rush API key to that URL.
+
 ### Filter syntax
 
 Filters support `=`, `!=`, `>`, `>=`, `<`, `<=`, and `~`. The `~` shorthand is
@@ -171,6 +201,7 @@ Available environment variables:
 - `RUSH_POLL_INTERVAL_MS`
 - `RUSH_WINDOW_SECONDS`
 - `RUSH_BUFFER_SIZE`
+- `RUSH_KUBERNETES_GATEWAY_URL`
 
 ## How live tail works
 

@@ -12,3 +12,6 @@ poll_interval_ms = 1000
 window_seconds = 300
 buffer_size = 5000
 
+[kubernetes]
+# Full Kubernetes API URL exposed by the Rush access gateway.
+# gateway_url = "https://kubernetes.rush.example.com/clusters/prod-us-east-1"

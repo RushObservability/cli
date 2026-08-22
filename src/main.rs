@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod cli;
 mod config;
+mod kubernetes;
 mod model;
 mod ui;
 
@@ -46,6 +47,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Command::Tail(tail) => run_tail(&cli, tail).await,
+        Command::Kubernetes(args) => kubernetes::run(&cli, args),
     }
 }
 
