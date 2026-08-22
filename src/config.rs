@@ -108,12 +108,18 @@ pub fn kubernetes_gateway_url(cli: &Cli, explicit: Option<String>) -> Result<Str
     Ok(value.trim_end_matches('/').to_string())
 }
 
-pub fn api_key(cli: &Cli) -> Result<Option<String>> {
+pub fn kubernetes_login_urls(cli: &Cli) -> Result<(String, String)> {
     let file = load_file(cli)?;
-    Ok(
-        first(cli.api_key.clone(), env_value("RUSH_API_KEY"), file.api_key)
-            .filter(|value| !value.trim().is_empty()),
-    )
+    let api_url = first(cli.url.clone(), env_value("RUSH_URL"), file.url)
+        .unwrap_or_else(|| "http://localhost:8080".to_string());
+    let web_url = first(cli.web_url.clone(), env_value("RUSH_WEB_URL"), file.web_url)
+        .unwrap_or_else(|| "http://localhost:5173".to_string());
+    validate_base_url(&api_url, "API")?;
+    validate_base_url(&web_url, "web UI")?;
+    Ok((
+        api_url.trim_end_matches('/').to_string(),
+        web_url.trim_end_matches('/').to_string(),
+    ))
 }
 
 fn first<T>(a: Option<T>, b: Option<T>, c: Option<T>) -> Option<T> {

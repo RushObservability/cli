@@ -117,7 +117,8 @@ access gateway:
 
 ```bash
 export RUSH_KUBERNETES_GATEWAY_URL='https://kubernetes.rush.example.com/clusters/prod-us-east-1'
-export RUSH_API_KEY='your-api-key'
+export RUSH_URL='https://rush.example.com'
+export RUSH_WEB_URL='https://rush.example.com'
 
 rush kubernetes kubeconfig \
   --cluster prod-us-east-1 \
@@ -126,19 +127,21 @@ rush kubernetes kubeconfig \
 KUBECONFIG=~/.kube/rush-prod kubectl get pods
 ```
 
-The generated file uses Kubernetes' exec-credential protocol. It runs
-`rush kubernetes credential` when `kubectl` needs a token, so the kubeconfig
-does not contain the Rush API key. The gateway sees the original Kubernetes API
-request and handles recording without changing `kubectl` stdout, stderr, stdin,
-TTY behavior, or exit codes.
+The generated file uses Kubernetes' exec-credential protocol. The first
+`kubectl` command opens Rush in your browser. Sign in with local auth or SSO,
+review the cluster, and approve the request. The CLI stores the short-lived
+credential in a private user-only cache and asks you to sign in again after it
+expires. Kubernetes access never uses `RUSH_API_KEY`.
+
+The gateway sees the original Kubernetes API request and handles recording
+without changing `kubectl` stdout, stderr, stdin, TTY behavior, or exit codes.
 
 Use `--gateway-url` instead of `RUSH_KUBERNETES_GATEWAY_URL` when generating
 configs for several clusters. If you pass `rush --config <path>`, the generated
 exec-credential arguments retain that path.
 
 Gateway URLs must use HTTPS. Plain HTTP is accepted only for `localhost` and
-loopback IPs during local development because the exec credential sends your
-Rush API key to that URL.
+loopback IPs during local development.
 
 ### Filter syntax
 
