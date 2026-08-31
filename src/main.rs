@@ -82,6 +82,22 @@ async fn run_tail(cli: &Cli, tail: &TailArgs) -> Result<()> {
     }
 }
 
+/// Serialize one record as a JSON line.
+///
+/// Serialization goes through a buffer rather than `to_writer` so that every
+/// error surfacing from this function is a real `io::Error`, which lets the
+/// caller distinguish a closed pipe from a genuine write failure.
+fn write_record<W: Write, T: serde::Serialize>(out: &mut W, record: &T) -> io::Result<()> {
+    let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
+    line.push(b'\n');
+    out.write_all(&line)
+}
+
+/// True when the downstream reader has gone away.
+fn is_broken_pipe(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::BrokenPipe
+}
+
 async fn run_json(client: RushClient, spec: QuerySpec, config: &config::Config) -> Result<()> {
     let mut seen = HashSet::new();
     let mut order = VecDeque::new();
@@ -98,8 +114,14 @@ async fn run_json(client: RushClient, spec: QuerySpec, config: &config::Config) 
                         for record in records.into_iter().rev() {
                             let key = record.key();
                             if seen.insert(key.clone()) {
-                                serde_json::to_writer(&mut output, &record)?;
-                                output.write_all(b"\n")?;
+                                match write_record(&mut output, &record) {
+                                    Ok(()) => {}
+                                    // `rush tail --output json | head` closes the
+                                    // pipe early. For a tail-style tool that is
+                                    // normal termination, not a failure.
+                                    Err(error) if is_broken_pipe(&error) => return Ok(()),
+                                    Err(error) => return Err(error.into()),
+                                }
                                 order.push_back(key);
                                 while order.len() > config.buffer_size {
                                     if let Some(expired) = order.pop_front() {
@@ -108,7 +130,11 @@ async fn run_json(client: RushClient, spec: QuerySpec, config: &config::Config) 
                                 }
                             }
                         }
-                        output.flush()?;
+                        match output.flush() {
+                            Ok(()) => {}
+                            Err(error) if is_broken_pipe(&error) => return Ok(()),
+                            Err(error) => return Err(error.into()),
+                        }
                     }
                     Err(error @ (ApiError::Unauthorized | ApiError::Forbidden)) => return Err(error.into()),
                     Err(error) => eprintln!("rush: {error}"),
@@ -205,5 +231,55 @@ async fn poll(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A writer that always reports the downstream reader has closed.
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+        }
+    }
+
+    #[test]
+    fn broken_pipe_is_recognised() {
+        let err = io::Error::new(io::ErrorKind::BrokenPipe, "closed");
+        assert!(is_broken_pipe(&err));
+    }
+
+    #[test]
+    fn other_io_errors_are_not_broken_pipe() {
+        let err = io::Error::new(io::ErrorKind::PermissionDenied, "nope");
+        assert!(!is_broken_pipe(&err));
+    }
+
+    #[test]
+    fn write_record_surfaces_broken_pipe_as_io_error() {
+        let record = serde_json::json!({ "message": "hello" });
+        let err = write_record(&mut BrokenPipeWriter, &record)
+            .expect_err("a closed pipe must produce an error");
+        assert!(
+            is_broken_pipe(&err),
+            "expected BrokenPipe, got {:?}",
+            err.kind()
+        );
+    }
+
+    #[test]
+    fn write_record_emits_one_newline_terminated_json_line() {
+        let record = serde_json::json!({ "message": "hello" });
+        let mut buf = Vec::new();
+        write_record(&mut buf, &record).expect("writing to a Vec cannot fail");
+        assert_eq!(buf.iter().filter(|b| **b == b'\n').count(), 1);
+        assert!(buf.ends_with(b"\n"));
     }
 }
