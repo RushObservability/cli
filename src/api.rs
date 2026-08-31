@@ -21,8 +21,41 @@ pub enum ApiError {
     Forbidden,
     #[error("Rush returned {status}: {message}")]
     Response { status: StatusCode, message: String },
+    #[error(
+        "Rush sent more than {max} bytes in one response; refusing to buffer it. \
+This should not happen against a healthy server"
+    )]
+    ResponseTooLarge { max: usize },
     #[error("request failed: {0}")]
     Transport(#[from] reqwest::Error),
+}
+
+/// Largest response body we will buffer, in bytes.
+///
+/// A tail query asks for at most a few thousand rows, so a healthy server stays
+/// far below this. The cap exists so a hostile or malfunctioning server cannot
+/// make the client allocate without bound: the request timeout limits how long
+/// a body may stream for, but says nothing about how large it may be.
+const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+/// Read a response body, refusing to buffer more than `max` bytes.
+///
+/// Chunks are counted as they arrive rather than trusting Content-Length,
+/// which a hostile server can omit or understate; chunked encoding has no
+/// length at all. Reading stops at the first chunk that would exceed the cap,
+/// so the peak allocation is bounded by `max` plus one chunk.
+async fn read_body_capped(
+    mut response: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, ApiError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > max {
+            return Err(ApiError::ResponseTooLarge { max });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 #[derive(Clone)]
@@ -110,17 +143,23 @@ impl RushClient {
             return Err(ApiError::Forbidden);
         }
         if !status.is_success() {
-            let message = response
-                .text()
+            // Error bodies are attacker-influenced too, so they get the same cap.
+            let message = read_body_capped(response, MAX_RESPONSE_BYTES)
                 .await
-                .unwrap_or_else(|_| "request failed".to_string());
+                .ok()
+                .and_then(|body| String::from_utf8(body).ok())
+                .unwrap_or_else(|| "request failed".to_string());
             let message = serde_json::from_str::<serde_json::Value>(&message)
                 .ok()
                 .and_then(|value| value.get("message")?.as_str().map(str::to_string))
                 .unwrap_or_else(|| format!("request failed ({status})"));
             return Err(ApiError::Response { status, message });
         }
-        Ok(response.json().await?)
+        let body = read_body_capped(response, MAX_RESPONSE_BYTES).await?;
+        serde_json::from_slice(&body).map_err(|error| ApiError::Response {
+            status,
+            message: format!("could not parse the response: {error}"),
+        })
     }
 }
 
@@ -243,6 +282,71 @@ mod tests {
             window_seconds: 300,
             buffer_size: 5000,
         }
+    }
+
+    #[tokio::test]
+    async fn body_within_the_cap_is_read_in_full() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/echo");
+            then.status(200).body("x".repeat(512));
+        });
+        let response = reqwest::Client::new()
+            .post(server.url("/echo"))
+            .send()
+            .await
+            .expect("request should reach the mock server");
+        let body = read_body_capped(response, 1024)
+            .await
+            .expect("a body under the cap must be accepted");
+        assert_eq!(body.len(), 512);
+    }
+
+    #[tokio::test]
+    async fn body_over_the_cap_is_refused() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/flood");
+            then.status(200).body("x".repeat(4096));
+        });
+        let response = reqwest::Client::new()
+            .post(server.url("/flood"))
+            .send()
+            .await
+            .expect("request should reach the mock server");
+        let error = read_body_capped(response, 256)
+            .await
+            .expect_err("a body over the cap must be refused");
+        assert!(
+            matches!(error, ApiError::ResponseTooLarge { max: 256 }),
+            "expected ResponseTooLarge, got {error:?}"
+        );
+        // The message must be actionable without leaking the body back.
+        let text = error.to_string();
+        assert!(text.contains("256"), "error should state the cap: {text}");
+        assert!(
+            !text.contains("xxxx"),
+            "error must not echo the body: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_exactly_at_the_cap_is_accepted() {
+        // Guards an off-by-one at the boundary.
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/exact");
+            then.status(200).body("x".repeat(100));
+        });
+        let response = reqwest::Client::new()
+            .post(server.url("/exact"))
+            .send()
+            .await
+            .expect("request should reach the mock server");
+        let body = read_body_capped(response, 100)
+            .await
+            .expect("a body exactly at the cap must be accepted");
+        assert_eq!(body.len(), 100);
     }
 
     #[tokio::test]
