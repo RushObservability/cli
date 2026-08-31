@@ -2,7 +2,9 @@ use std::{
     collections::HashMap,
     env, fs,
     io::{self, Write},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -46,6 +48,22 @@ struct CredentialCache {
     credentials: HashMap<String, CachedCredential>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ClientReported {
+    argv: Vec<String>,
+    cli_version: String,
+    os: String,
+    arch: String,
+    hostname: String,
+    private_ips: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientEnrichmentOutcome {
+    Accepted,
+    CredentialRejected,
+}
+
 pub async fn run(cli: &Cli, args: &KubernetesArgs) -> Result<()> {
     match &args.command {
         KubernetesCommand::Kubeconfig(args) => print_kubeconfig(cli, args),
@@ -66,12 +84,13 @@ async fn print_credential(cli: &Cli, args: &CredentialArgs) -> Result<()> {
     let cache_key = format!("{api_url}|{}", args.cluster);
     let cache_path = credential_cache_path()?;
     let mut cache = read_credential_cache(&cache_path)?;
-    let credential = match cache
+    let cached = cache
         .credentials
         .get(&cache_key)
         .filter(|credential| credential_is_fresh(credential))
-        .cloned()
-    {
+        .cloned();
+    let mut from_cache = cached.is_some();
+    let mut credential = match cached {
         Some(credential) => credential,
         None => {
             let credential = browser_login(
@@ -81,11 +100,35 @@ async fn print_credential(cli: &Cli, args: &CredentialArgs) -> Result<()> {
                 env::var_os("RUSH_KUBERNETES_NO_BROWSER").is_none(),
             )
             .await?;
-            cache.credentials.insert(cache_key, credential.clone());
+            cache
+                .credentials
+                .insert(cache_key.clone(), credential.clone());
             write_credential_cache(&cache_path, &cache)?;
             credential
         }
     };
+    // Device context is optional and must never change normal kubectl output.
+    if matches!(
+        report_client_enrichment(&api_url, &args.cluster, &credential).await,
+        Ok(ClientEnrichmentOutcome::CredentialRejected)
+    ) && from_cache
+    {
+        cache.credentials.remove(&cache_key);
+        write_credential_cache(&cache_path, &cache)?;
+        eprintln!("Your Rush Kubernetes session ended. Sign in again to continue.");
+        credential = browser_login(
+            &api_url,
+            &web_url,
+            &args.cluster,
+            env::var_os("RUSH_KUBERNETES_NO_BROWSER").is_none(),
+        )
+        .await?;
+        cache.credentials.insert(cache_key, credential.clone());
+        write_credential_cache(&cache_path, &cache)?;
+        from_cache = false;
+        let _ = report_client_enrichment(&api_url, &args.cluster, &credential).await;
+    }
+    debug_assert!(!from_cache || credential_is_fresh(&credential));
     write_json(&exec_credential(&credential.token, &credential.expires_at))
 }
 
@@ -168,6 +211,233 @@ async fn browser_login(
         return Ok(CachedCredential { token, expires_at });
     }
     bail!("Rush Kubernetes login expired before it was approved")
+}
+
+async fn report_client_enrichment(
+    api_url: &str,
+    cluster: &str,
+    credential: &CachedCredential,
+) -> Result<ClientEnrichmentOutcome> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent(concat!("rush-cli/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("failed to create Kubernetes enrichment client")?;
+    let response = client
+        .post(format!("{api_url}/api/v1/kubernetes/access-events/client"))
+        .bearer_auth(&credential.token)
+        .json(&json!({
+            "cluster_id": cluster,
+            "client_reported": client_report(),
+        }))
+        .send()
+        .await
+        .context("failed to send kubectl device details")?;
+    if response.status().is_success() {
+        return Ok(ClientEnrichmentOutcome::Accepted);
+    }
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(ClientEnrichmentOutcome::CredentialRejected);
+    }
+    let status = response.status();
+    let message = response.text().await.unwrap_or_default();
+    bail!(
+        "query-api rejected kubectl device details ({status}): {}",
+        message.trim()
+    )
+}
+
+fn client_report() -> ClientReported {
+    ClientReported {
+        argv: parent_kubectl_argv(),
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        os: env::consts::OS.to_string(),
+        arch: env::consts::ARCH.to_string(),
+        hostname: hostname_label(),
+        private_ips: local_private_ips(),
+    }
+}
+
+fn hostname_label() -> String {
+    for name in ["HOSTNAME", "COMPUTERNAME"] {
+        if let Ok(value) = env::var(name) {
+            let value = value.trim();
+            if !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control) {
+                return value.to_string();
+            }
+        }
+    }
+    command_output("hostname", &[])
+        .map(|value| value.trim().chars().take(256).collect())
+        .unwrap_or_default()
+}
+
+fn parent_kubectl_argv() -> Vec<String> {
+    let pid = std::process::id().to_string();
+    let parent_pid = command_output("ps", &["-o", "ppid=", "-p", &pid])
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    let Some(parent_pid) = parent_pid else {
+        return Vec::new();
+    };
+    let parent_pid = parent_pid.to_string();
+    let Some(command) = command_output("ps", &["-ww", "-o", "command=", "-p", &parent_pid]) else {
+        return Vec::new();
+    };
+    let mut argv = split_process_command(command.trim());
+    let is_kubectl = argv
+        .first()
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value == "kubectl");
+    if !is_kubectl {
+        return Vec::new();
+    }
+    if let Some(binary) = argv.first_mut() {
+        *binary = "kubectl".to_string();
+    }
+    redact_sensitive_args(&mut argv);
+    argv.truncate(128);
+    argv
+}
+
+fn split_process_command(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in value.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            } else {
+                current.push(character);
+            }
+            continue;
+        }
+        if character.is_whitespace() && quote.is_none() {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        current.push(character);
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+fn redact_sensitive_args(argv: &mut [String]) {
+    let mut redact_next = false;
+    for argument in argv {
+        if redact_next {
+            *argument = "[REDACTED]".to_string();
+            redact_next = false;
+            continue;
+        }
+        let lower = argument.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "--token" | "--password" | "--client-key" | "--client-certificate"
+        ) {
+            redact_next = true;
+            continue;
+        }
+        for prefix in [
+            "--token=",
+            "--password=",
+            "--client-key=",
+            "--client-certificate=",
+        ] {
+            if lower.starts_with(prefix) {
+                let flag = argument
+                    .split_once('=')
+                    .map(|(flag, _)| flag.to_string())
+                    .unwrap_or_else(|| argument.clone());
+                *argument = format!("{flag}=[REDACTED]");
+                break;
+            }
+        }
+    }
+}
+
+fn command_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn local_private_ips() -> Vec<String> {
+    let mut addresses = Vec::new();
+    for (program, args) in [
+        ("/sbin/ifconfig", Vec::<&str>::new()),
+        ("ifconfig", Vec::<&str>::new()),
+        ("ip", vec!["-o", "addr", "show"]),
+    ] {
+        let Some(output) = command_output(program, &args) else {
+            continue;
+        };
+        for line in output.lines() {
+            let words = line.split_whitespace().collect::<Vec<_>>();
+            for (index, word) in words.iter().enumerate() {
+                if !matches!(*word, "inet" | "inet6") {
+                    continue;
+                }
+                let Some(raw) = words.get(index + 1) else {
+                    continue;
+                };
+                let candidate = raw
+                    .split('/')
+                    .next()
+                    .unwrap_or(raw)
+                    .split('%')
+                    .next()
+                    .unwrap_or(raw);
+                let Ok(address) = candidate.parse::<IpAddr>() else {
+                    continue;
+                };
+                let private = match address {
+                    IpAddr::V4(value) => ipv4_is_private(value),
+                    IpAddr::V6(value) => ipv6_is_private(value),
+                };
+                if private {
+                    addresses.push(address.to_string());
+                }
+            }
+        }
+        if !addresses.is_empty() {
+            break;
+        }
+    }
+    addresses.sort();
+    addresses.dedup();
+    addresses.truncate(8);
+    addresses
+}
+
+fn ipv4_is_private(value: Ipv4Addr) -> bool {
+    value.is_private() || value.is_link_local()
+}
+
+fn ipv6_is_private(value: Ipv6Addr) -> bool {
+    value.is_unique_local() || value.is_unicast_link_local()
 }
 
 fn credential_cache_path() -> Result<PathBuf> {
@@ -478,6 +748,72 @@ mod tests {
         poll.assert();
         leaked_api_key.assert_hits(0);
         assert!(credential.token.starts_with("rkt1_"));
+    }
+
+    #[tokio::test]
+    async fn reports_client_enrichment_with_the_temporary_credential() {
+        let server = MockServer::start();
+        let token = format!("rkt1_{}", "a".repeat(64));
+        let report = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/kubernetes/access-events/client")
+                .header("authorization", format!("Bearer {token}"))
+                .body_contains("\"cluster_id\":\"orbstack\"")
+                .body_contains("\"cli_version\"")
+                .body_contains("\"os\"")
+                .body_contains("\"arch\"");
+            then.status(204);
+        });
+        let credential = CachedCredential {
+            token,
+            expires_at: "2026-08-22 13:00:00".to_string(),
+        };
+
+        let outcome = report_client_enrichment(&server.base_url(), "orbstack", &credential)
+            .await
+            .unwrap();
+
+        report.assert();
+        assert_eq!(outcome, ClientEnrichmentOutcome::Accepted);
+    }
+
+    #[tokio::test]
+    async fn reports_when_a_cached_credential_was_revoked() {
+        let server = MockServer::start();
+        let token = format!("rkt1_{}", "b".repeat(64));
+        let report = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/kubernetes/access-events/client")
+                .header("authorization", format!("Bearer {token}"));
+            then.status(401).body("Kubernetes credential was revoked");
+        });
+        let credential = CachedCredential {
+            token,
+            expires_at: "2099-08-22 13:00:00".to_string(),
+        };
+
+        let outcome = report_client_enrichment(&server.base_url(), "orbstack", &credential)
+            .await
+            .unwrap();
+
+        report.assert();
+        assert_eq!(outcome, ClientEnrichmentOutcome::CredentialRejected);
+    }
+
+    #[test]
+    fn original_command_parser_preserves_arguments_and_redacts_secrets() {
+        let mut argv = split_process_command(
+            "/usr/local/bin/kubectl exec 'pod with spaces' --token=secret --password hunter2 -- sh",
+        );
+        redact_sensitive_args(&mut argv);
+
+        assert_eq!(argv[0], "/usr/local/bin/kubectl");
+        assert_eq!(argv[2], "pod with spaces");
+        assert_eq!(argv[3], "--token=[REDACTED]");
+        assert_eq!(argv[4], "--password");
+        assert_eq!(argv[5], "[REDACTED]");
+        assert!(!argv.join(" ").contains("secret"));
+        assert!(!argv.join(" ").contains("hunter2"));
     }
 
     #[test]

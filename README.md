@@ -131,10 +131,16 @@ The generated file uses Kubernetes' exec-credential protocol. The first
 `kubectl` command opens Rush in your browser. Sign in with local auth or SSO,
 review the cluster, and approve the request. The CLI stores the short-lived
 credential in a private user-only cache and asks you to sign in again after it
-expires. Kubernetes access never uses `RUSH_API_KEY`.
+expires. If an administrator ends the session early, the next `kubectl` command
+opens login again. Kubernetes access never uses `RUSH_API_KEY`.
 
 The gateway sees the original Kubernetes API request and handles recording
 without changing `kubectl` stdout, stderr, stdin, TTY behavior, or exit codes.
+On each credential request, the CLI also reports its operating system,
+architecture, version, hostname label, and a best-effort copy of the parent
+`kubectl` command. These fields are informational and are never used to allow
+or deny access. Common credential arguments are redacted before they leave the
+device.
 
 Use `--gateway-url` instead of `RUSH_KUBERNETES_GATEWAY_URL` when generating
 configs for several clusters. If you pass `rush --config <path>`, the generated
