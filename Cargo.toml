@@ -31,7 +31,9 @@ url = "2.5"
 unicode-width = "0.2"
 
 [dev-dependencies]
+assert_cmd = "2.0"
 httpmock = "0.7"
+predicates = "3.1"
 tempfile = "3.19"
 
 [profile.release]

@@ -376,7 +376,7 @@ fn merge_records(target: &mut Vec<TailRecord>, incoming: Vec<TailRecord>, limit:
             merged.push(record);
         }
     }
-    merged.sort_unstable_by(|left, right| right.timestamp_ns.cmp(&left.timestamp_ns));
+    merged.sort_unstable_by_key(|record| std::cmp::Reverse(record.timestamp_ns));
     merged.truncate(limit);
     *target = merged;
 }
