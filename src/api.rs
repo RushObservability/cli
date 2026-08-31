@@ -30,6 +30,43 @@ This should not happen against a healthy server"
     Transport(#[from] reqwest::Error),
 }
 
+/// Longest server-supplied error text we will repeat back.
+const MAX_SERVER_MESSAGE_CHARS: usize = 300;
+
+/// Make server-supplied text safe to print to a terminal.
+///
+/// The message in an error body is chosen by whoever is answering our
+/// requests. In JSON mode it is written straight to stderr, which bypasses the
+/// TUI: ratatui discards control characters when it fills its cell buffer, but
+/// `eprintln!` does not, so raw bytes would reach the terminal verbatim.
+///
+/// Removed:
+/// - control characters, which covers ESC and therefore every CSI/OSC escape
+///   sequence a terminal would act on, plus newlines that would let one error
+///   forge additional output lines
+/// - Unicode bidirectional overrides, which can reorder displayed text so it
+///   reads differently from its bytes (the Trojan Source trick)
+///
+/// The result is also length-capped: the body cap is measured in megabytes,
+/// which is far more than belongs on one error line.
+fn sanitise_server_text(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .filter(|ch| {
+            // is_control covers C0, C1 and DEL. Bidi controls are Cf, not Cc,
+            // so they have to be named.
+            !ch.is_control() && !matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() <= MAX_SERVER_MESSAGE_CHARS {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(MAX_SERVER_MESSAGE_CHARS).collect();
+    out.push('…');
+    out
+}
+
 /// Largest response body we will buffer, in bytes.
 ///
 /// A tail query asks for at most a few thousand rows, so a healthy server stays
@@ -152,6 +189,10 @@ impl RushClient {
             let message = serde_json::from_str::<serde_json::Value>(&message)
                 .ok()
                 .and_then(|value| value.get("message")?.as_str().map(str::to_string))
+                .map(|text| sanitise_server_text(&text))
+                // An all-control-character message sanitises to nothing, so
+                // fall back rather than printing an empty reason.
+                .filter(|text| !text.is_empty())
                 .unwrap_or_else(|| format!("request failed ({status})"));
             return Err(ApiError::Response { status, message });
         }
@@ -282,6 +323,95 @@ mod tests {
             window_seconds: 300,
             buffer_size: 5000,
         }
+    }
+
+    #[test]
+    fn sanitiser_strips_escape_sequences() {
+        // The whole point: ESC must not survive to reach a terminal.
+        let evil = "\u{1b}[2J\u{1b}[31mowned\u{1b}[0m";
+        let clean = sanitise_server_text(evil);
+        assert!(!clean.contains('\u{1b}'), "ESC survived: {clean:?}");
+        assert_eq!(clean, "[2J[31mowned[0m");
+    }
+
+    #[test]
+    fn sanitiser_collapses_forged_lines() {
+        // Newlines would let one error body forge extra output lines.
+        let clean = sanitise_server_text("real error\nrush: fake line\r\nanother");
+        assert!(!clean.contains('\n'));
+        assert!(!clean.contains('\r'));
+    }
+
+    #[test]
+    fn sanitiser_strips_bidi_overrides() {
+        // Trojan Source: reorders displayed text away from its bytes.
+        let clean = sanitise_server_text("safe\u{202e}reversed\u{2069}");
+        assert!(!clean.contains('\u{202e}'), "bidi override survived");
+        assert!(!clean.contains('\u{2069}'));
+        assert_eq!(clean, "safereversed");
+    }
+
+    #[test]
+    fn sanitiser_keeps_ordinary_text_intact() {
+        // Must not mangle legitimate messages, including non-ASCII.
+        for text in [
+            "tenant not found",
+            "quota exceeded (limit 1000)",
+            "café über 日本語",
+        ] {
+            assert_eq!(sanitise_server_text(text), text);
+        }
+    }
+
+    #[test]
+    fn sanitiser_caps_absurdly_long_messages() {
+        let clean = sanitise_server_text(&"a".repeat(10_000));
+        assert_eq!(clean.chars().count(), MAX_SERVER_MESSAGE_CHARS + 1);
+        assert!(clean.ends_with('…'));
+    }
+
+    #[test]
+    fn sanitiser_returns_empty_for_control_only_input() {
+        // The caller falls back to a generic reason rather than printing nothing.
+        assert!(sanitise_server_text("\u{1b}\u{7f}\u{0}").is_empty());
+    }
+
+    #[tokio::test]
+    async fn escape_sequences_in_a_server_error_never_reach_the_caller() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/api/v1/logs");
+            then.status(500).json_body(json!({
+                "message": "\u{1b}[2Jboom\nrush: forged line"
+            }));
+        });
+        let spec = QuerySpec {
+            signal: Signal::Logs,
+            search: String::new(),
+            filters: vec![],
+            window: Duration::from_secs(60),
+            limit: 100,
+        };
+
+        let error = RushClient::new(&config(&server))
+            .unwrap()
+            .fetch(&spec)
+            .await
+            .unwrap_err();
+
+        let rendered = error.to_string();
+        assert!(
+            !rendered.contains('\u{1b}'),
+            "ESC reached the caller: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains('\n'),
+            "newline reached the caller: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("boom"),
+            "the real message should survive: {rendered}"
+        );
     }
 
     #[tokio::test]
