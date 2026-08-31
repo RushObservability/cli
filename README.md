@@ -171,6 +171,10 @@ Available environment variables:
 - `RUSH_POLL_INTERVAL_MS`
 - `RUSH_WINDOW_SECONDS`
 - `RUSH_BUFFER_SIZE`
+- `RUSH_ALLOW_INSECURE_HTTP` — set to any value to permit sending `RUSH_API_KEY`
+  over plaintext `http://` to a remote host. Refused by default, because the key
+  would travel in cleartext. Loopback URLs such as `http://localhost:8080` are
+  always allowed and need no override.
 
 ## How live tail works
 
