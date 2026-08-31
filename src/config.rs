@@ -45,6 +45,13 @@ impl Config {
             _ => FileConfig::default(),
         };
 
+        // Only worth warning about when the file itself holds a key.
+        if file.api_key.is_some() {
+            if let Some(path) = path.as_ref() {
+                warn_if_config_is_readable_by_others(path);
+            }
+        }
+
         let url = first(cli.url.clone(), env_value("RUSH_URL"), file.url)
             .unwrap_or_else(|| "http://localhost:8080".to_string());
         let web_url = first(cli.web_url.clone(), env_value("RUSH_WEB_URL"), file.web_url)
@@ -107,6 +114,42 @@ impl Config {
 ///
 /// The text is a constant: it must never interpolate the key it is warning
 /// about.
+/// True when a Unix mode grants group or other any access at all.
+///
+/// Defined unconditionally, and tested on every platform, so the bit logic
+/// stays covered even where it is not applied.
+fn mode_is_readable_by_others(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
+/// Warn when a config file holding an API key is readable beyond its owner.
+///
+/// Only warns: this is the user's own file on their own machine, the tool
+/// never creates it, and refusing outright would break working setups over a
+/// risk that needs local access to exploit. The message is actionable so the
+/// warning is worth acting on rather than muting.
+#[cfg(unix)]
+fn warn_if_config_is_readable_by_others(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    let mode = metadata.permissions().mode();
+    if mode_is_readable_by_others(mode) {
+        eprintln!(
+            "rush: warning: {} contains an API key and is readable by other users (mode {:o}). Run: chmod 600 {}",
+            path.display(),
+            mode & 0o777,
+            path.display()
+        );
+    }
+}
+
+/// Windows has no Unix mode bits, so there is nothing to check.
+#[cfg(not(unix))]
+fn warn_if_config_is_readable_by_others(_path: &std::path::Path) {}
+
 fn api_key_flag_warning(flag: Option<&str>) -> Option<&'static str> {
     match flag {
         Some(value) if !value.trim().is_empty() => Some(
@@ -183,6 +226,30 @@ pub fn default_config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_only_modes_are_not_flagged() {
+        for mode in [0o600, 0o400, 0o700] {
+            assert!(!mode_is_readable_by_others(mode), "{mode:o} is owner-only");
+        }
+    }
+
+    #[test]
+    fn group_or_other_access_is_flagged() {
+        for mode in [0o644, 0o640, 0o604, 0o666, 0o777, 0o601, 0o610] {
+            assert!(
+                mode_is_readable_by_others(mode),
+                "{mode:o} grants access to others"
+            );
+        }
+    }
+
+    #[test]
+    fn high_bits_do_not_confuse_the_check() {
+        // st_mode carries the file type in the high bits; only the low 9 matter.
+        assert!(!mode_is_readable_by_others(0o100_600));
+        assert!(mode_is_readable_by_others(0o100_644));
+    }
 
     #[test]
     fn warns_when_the_key_comes_from_the_command_line() {
