@@ -52,6 +52,9 @@ impl Config {
         validate_base_url(&url, "API")?;
         validate_base_url(&web_url, "web UI")?;
 
+        if let Some(warning) = api_key_flag_warning(cli.api_key.as_deref()) {
+            eprintln!("{warning}");
+        }
         let api_key = first(cli.api_key.clone(), env_value("RUSH_API_KEY"), file.api_key)
             .filter(|value| !value.trim().is_empty());
         // Only the API URL carries the key; web_url is just handed to a browser.
@@ -95,6 +98,25 @@ impl Config {
 
 /// True when the URL points at this machine, where plaintext HTTP does not put
 /// the key on a network.
+/// Warning shown when the key was supplied with --api-key.
+///
+/// Command-line arguments are world-readable through the process list, so any
+/// other user on the host can read the key out of `ps` for as long as the
+/// process runs. Returns None when the flag was not used, or carried nothing,
+/// which mirrors how the key itself is filtered.
+///
+/// The text is a constant: it must never interpolate the key it is warning
+/// about.
+fn api_key_flag_warning(flag: Option<&str>) -> Option<&'static str> {
+    match flag {
+        Some(value) if !value.trim().is_empty() => Some(
+            "rush: warning: --api-key is readable by other users through the process list (ps). \
+Prefer RUSH_API_KEY or the config file.",
+        ),
+        _ => None,
+    }
+}
+
 fn is_loopback_host(url: &Url) -> bool {
     match url.host() {
         Some(url::Host::Domain(domain)) => domain == "localhost" || domain.ends_with(".localhost"),
@@ -161,6 +183,35 @@ pub fn default_config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warns_when_the_key_comes_from_the_command_line() {
+        let warning = api_key_flag_warning(Some("secret")).expect("using --api-key should warn");
+        assert!(
+            warning.contains("ps"),
+            "warning should name the process list"
+        );
+        assert!(
+            warning.contains("RUSH_API_KEY"),
+            "warning should offer the alternative"
+        );
+    }
+
+    #[test]
+    fn the_warning_never_contains_the_key() {
+        let warning = api_key_flag_warning(Some("supersecret123")).unwrap();
+        assert!(
+            !warning.contains("supersecret123"),
+            "the warning must not echo the key it is warning about"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_the_flag_is_unused_or_empty() {
+        assert!(api_key_flag_warning(None).is_none());
+        assert!(api_key_flag_warning(Some("")).is_none());
+        assert!(api_key_flag_warning(Some("   ")).is_none());
+    }
 
     #[test]
     fn https_with_a_key_is_allowed() {
