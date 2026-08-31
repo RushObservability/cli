@@ -253,8 +253,8 @@ mod tests {
                 .path("/api/v1/logs")
                 .header("authorization", "Bearer test-key")
                 .header("x-rush-tenant", "default")
-                .body_contains("\"search\":\"panic\"")
-                .body_contains("\"slim\":true");
+                .body_includes("\"search\":\"panic\"")
+                .body_includes("\"slim\":true");
             then.status(200).json_body(json!({
                 "rows": [{
                     "Timestamp": 1_700_000_000_000_000_000_i64,
@@ -298,8 +298,8 @@ mod tests {
         let request = server.mock(|when, then| {
             when.method(POST)
                 .path("/api/v1/query")
-                .body_contains("\"columns\":\"list\"")
-                .body_contains("\"field\":\"service_name\"");
+                .body_includes("\"columns\":\"list\"")
+                .body_includes("\"field\":\"service_name\"");
             then.status(200).json_body(json!({
                 "rows": [{
                     "timestamp": 1_700_000_000_000_000_000_i64,
