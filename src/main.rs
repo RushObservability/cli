@@ -14,8 +14,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use api::{ApiError, RushClient};
 use app::{Action, App};
-use clap::Parser;
-use cli::{Cli, Command, OutputMode, TailArgs};
+use clap::{CommandFactory, Parser};
+use cli::{Cli, Command, CompletionsArgs, ManArgs, OutputMode, TailArgs};
 use crossterm::{
     event::{Event, EventStream, KeyEventKind},
     execute,
@@ -46,7 +46,43 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Command::Tail(tail) => run_tail(&cli, tail).await,
+        Command::Completions(args) => {
+            write_completions(args, &mut io::stdout());
+            Ok(())
+        }
+        Command::Man(args) => write_man(args, &mut io::stdout()),
     }
+}
+
+/// Write a shell completion script for `shell` to `out`.
+fn write_completions<W: Write>(args: &CompletionsArgs, out: &mut W) {
+    let mut command = Cli::command();
+    let name = command.get_name().to_string();
+    clap_complete::generate(args.shell, &mut command, name, out);
+}
+
+/// Write a roff man page to `out`.
+///
+/// The top-level page cross-references subcommand pages such as rush-tail(1),
+/// so those have to be renderable too or the references dangle.
+fn write_man<W: Write>(args: &ManArgs, out: &mut W) -> Result<()> {
+    let top = Cli::command();
+    let command = match args.command.as_deref() {
+        None => top,
+        Some(name) => top
+            .find_subcommand(name)
+            .cloned()
+            .map(|sub| {
+                // clap wants a 'static name. The process renders one page and
+                // exits, so leaking a short string here is inconsequential.
+                let page: &'static str = Box::leak(format!("rush-{name}").into_boxed_str());
+                sub.name(page)
+            })
+            .with_context(|| format!("unknown subcommand `{name}`"))?,
+    };
+    clap_mangen::Man::new(command)
+        .render(out)
+        .context("failed to render the man page")
 }
 
 async fn run_tail(cli: &Cli, tail: &TailArgs) -> Result<()> {
