@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 use crate::model::Signal;
 
@@ -27,7 +28,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub tenant: Option<String>,
 
-    /// API key. Prefer RUSH_API_KEY so it does not appear in shell history.
+    /// API key. Prefer RUSH_API_KEY: a value passed here appears in shell
+    /// history and is readable by other users through the process list.
     #[arg(long, global = true, hide_env_values = true)]
     pub api_key: Option<String>,
 
@@ -39,6 +41,30 @@ pub struct Cli {
 pub enum Command {
     /// Follow recent telemetry in an interactive TUI or newline-delimited JSON.
     Tail(TailArgs),
+
+    /// Print a shell completion script to stdout.
+    ///
+    /// Example: `rush completions zsh > ~/.zfunc/_rush`
+    Completions(CompletionsArgs),
+
+    /// Print a roff man page to stdout.
+    ///
+    /// With no argument this renders the top-level page, whose SUBCOMMANDS
+    /// section cross-references pages like rush-tail(1). Pass a subcommand
+    /// name to render that page: `rush man tail > .../rush-tail.1`.
+    Man(ManArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ManArgs {
+    /// Subcommand to render. Omit for the top-level page.
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CompletionsArgs {
+    /// Shell to generate a completion script for.
+    pub shell: Shell,
 }
 
 #[derive(Debug, Clone, Args)]
