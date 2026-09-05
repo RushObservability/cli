@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # reviewed 2026-08-02
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # reviewed 2026-08-02
         with:
           # Pinned, not "stable": a new stable can add lints and turn this gate
           # red with no code change. Matches the other Rust repos in the org.
@@ -36,7 +36,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install dependency scanners
-        uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
 
