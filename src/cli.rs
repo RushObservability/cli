@@ -28,7 +28,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub tenant: Option<String>,
 
-    /// API key. Prefer RUSH_API_KEY so it does not appear in shell history.
+    /// API key. Prefer RUSH_API_KEY: a value passed here appears in shell
+    /// history and is readable by other users through the process list.
     #[arg(long, global = true, hide_env_values = true)]
     pub api_key: Option<String>,
 

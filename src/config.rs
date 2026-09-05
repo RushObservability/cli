@@ -45,12 +45,31 @@ impl Config {
             _ => FileConfig::default(),
         };
 
+        // Only worth warning about when the file itself holds a key.
+        if file.api_key.is_some() {
+            if let Some(path) = path.as_ref() {
+                warn_if_config_is_readable_by_others(path);
+            }
+        }
+
         let url = first(cli.url.clone(), env_value("RUSH_URL"), file.url)
             .unwrap_or_else(|| "http://localhost:8080".to_string());
         let web_url = first(cli.web_url.clone(), env_value("RUSH_WEB_URL"), file.web_url)
             .unwrap_or_else(|| "http://localhost:5173".to_string());
         validate_base_url(&url, "API")?;
         validate_base_url(&web_url, "web UI")?;
+
+        if let Some(warning) = api_key_flag_warning(cli.api_key.as_deref()) {
+            eprintln!("{warning}");
+        }
+        let api_key = first(cli.api_key.clone(), env_value("RUSH_API_KEY"), file.api_key)
+            .filter(|value| !value.trim().is_empty());
+        // Only the API URL carries the key; web_url is just handed to a browser.
+        ensure_key_transport_is_safe(
+            &url,
+            api_key.is_some(),
+            env_value("RUSH_ALLOW_INSECURE_HTTP").is_some(),
+        )?;
 
         let poll_interval_ms = tail
             .poll_interval_ms
@@ -76,13 +95,107 @@ impl Config {
             web_url: web_url.trim_end_matches('/').to_string(),
             tenant: first(cli.tenant.clone(), env_value("RUSH_TENANT"), file.tenant)
                 .unwrap_or_else(|| "default".to_string()),
-            api_key: first(cli.api_key.clone(), env_value("RUSH_API_KEY"), file.api_key)
-                .filter(|value| !value.trim().is_empty()),
+            api_key,
             poll_interval_ms,
             window_seconds,
             buffer_size,
         })
     }
+}
+
+/// True when the URL points at this machine, where plaintext HTTP does not put
+/// the key on a network.
+/// Warning shown when the key was supplied with --api-key.
+///
+/// Command-line arguments are world-readable through the process list, so any
+/// other user on the host can read the key out of `ps` for as long as the
+/// process runs. Returns None when the flag was not used, or carried nothing,
+/// which mirrors how the key itself is filtered.
+///
+/// The text is a constant: it must never interpolate the key it is warning
+/// about.
+/// True when a Unix mode grants group or other any access at all.
+///
+/// Defined unconditionally, and tested on every platform, so the bit logic
+/// stays covered even where it is not applied.
+fn mode_is_readable_by_others(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
+/// Warn when a config file holding an API key is readable beyond its owner.
+///
+/// Only warns: this is the user's own file on their own machine, the tool
+/// never creates it, and refusing outright would break working setups over a
+/// risk that needs local access to exploit. The message is actionable so the
+/// warning is worth acting on rather than muting.
+#[cfg(unix)]
+fn warn_if_config_is_readable_by_others(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    let mode = metadata.permissions().mode();
+    if mode_is_readable_by_others(mode) {
+        eprintln!(
+            "rush: warning: {} contains an API key and is readable by other users (mode {:o}). Run: chmod 600 {}",
+            path.display(),
+            mode & 0o777,
+            path.display()
+        );
+    }
+}
+
+/// Windows has no Unix mode bits, so there is nothing to check.
+#[cfg(not(unix))]
+fn warn_if_config_is_readable_by_others(_path: &std::path::Path) {}
+
+fn api_key_flag_warning(flag: Option<&str>) -> Option<&'static str> {
+    match flag {
+        Some(value) if !value.trim().is_empty() => Some(
+            "rush: warning: --api-key is readable by other users through the process list (ps). \
+Prefer RUSH_API_KEY or the config file.",
+        ),
+        _ => None,
+    }
+}
+
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost" || domain.ends_with(".localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
+/// Refuse to send an API key over plaintext HTTP to a remote host.
+///
+/// `http` stays allowed when there is no key to leak, and when the target is
+/// loopback -- the default URL is http://localhost:8080, and local development
+/// must keep working. Anything else would put a bearer token on the wire in
+/// cleartext, so it fails closed with an explicit opt-out for tunnels.
+fn ensure_key_transport_is_safe(url: &str, has_key: bool, allow_insecure: bool) -> Result<()> {
+    if !has_key {
+        return Ok(());
+    }
+    let parsed = Url::parse(url).with_context(|| format!("invalid API URL: {url}"))?;
+    if parsed.scheme() != "http" || is_loopback_host(&parsed) {
+        return Ok(());
+    }
+    if allow_insecure {
+        eprintln!(
+            "rush: warning: sending the API key over plaintext HTTP to {} because RUSH_ALLOW_INSECURE_HTTP is set",
+            parsed.host_str().unwrap_or("that host")
+        );
+        return Ok(());
+    }
+    bail!(
+        "refusing to send the API key over plaintext HTTP to {}. \
+Use https, or set RUSH_ALLOW_INSECURE_HTTP=1 if the connection is already \
+protected (for example an SSH tunnel or a local port-forward)",
+        parsed.host_str().unwrap_or("that host")
+    )
 }
 
 fn first<T>(a: Option<T>, b: Option<T>, c: Option<T>) -> Option<T> {
@@ -113,6 +226,115 @@ pub fn default_config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_only_modes_are_not_flagged() {
+        for mode in [0o600, 0o400, 0o700] {
+            assert!(!mode_is_readable_by_others(mode), "{mode:o} is owner-only");
+        }
+    }
+
+    #[test]
+    fn group_or_other_access_is_flagged() {
+        for mode in [0o644, 0o640, 0o604, 0o666, 0o777, 0o601, 0o610] {
+            assert!(
+                mode_is_readable_by_others(mode),
+                "{mode:o} grants access to others"
+            );
+        }
+    }
+
+    #[test]
+    fn high_bits_do_not_confuse_the_check() {
+        // st_mode carries the file type in the high bits; only the low 9 matter.
+        assert!(!mode_is_readable_by_others(0o100_600));
+        assert!(mode_is_readable_by_others(0o100_644));
+    }
+
+    #[test]
+    fn warns_when_the_key_comes_from_the_command_line() {
+        let warning = api_key_flag_warning(Some("secret")).expect("using --api-key should warn");
+        assert!(
+            warning.contains("ps"),
+            "warning should name the process list"
+        );
+        assert!(
+            warning.contains("RUSH_API_KEY"),
+            "warning should offer the alternative"
+        );
+    }
+
+    #[test]
+    fn the_warning_never_contains_the_key() {
+        let warning = api_key_flag_warning(Some("supersecret123")).unwrap();
+        assert!(
+            !warning.contains("supersecret123"),
+            "the warning must not echo the key it is warning about"
+        );
+    }
+
+    #[test]
+    fn no_warning_when_the_flag_is_unused_or_empty() {
+        assert!(api_key_flag_warning(None).is_none());
+        assert!(api_key_flag_warning(Some("")).is_none());
+        assert!(api_key_flag_warning(Some("   ")).is_none());
+    }
+
+    #[test]
+    fn https_with_a_key_is_allowed() {
+        assert!(ensure_key_transport_is_safe("https://rush.example", true, false).is_ok());
+    }
+
+    #[test]
+    fn plaintext_http_to_a_remote_host_with_a_key_is_refused() {
+        let error = ensure_key_transport_is_safe("http://rush.example", true, false)
+            .expect_err("a key must not go over plaintext HTTP to a remote host");
+        let message = error.to_string();
+        assert!(
+            message.contains("rush.example"),
+            "error should name the host: {message}"
+        );
+        assert!(
+            message.contains("RUSH_ALLOW_INSECURE_HTTP"),
+            "error should tell the user how to override: {message}"
+        );
+    }
+
+    #[test]
+    fn plaintext_http_without_a_key_is_allowed() {
+        // Nothing to leak, so this must not break anonymous use.
+        assert!(ensure_key_transport_is_safe("http://rush.example", false, false).is_ok());
+    }
+
+    #[test]
+    fn loopback_over_plaintext_http_keeps_working() {
+        // The default URL is http://localhost:8080; local development must not break.
+        for url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "http://api.localhost:8080",
+        ] {
+            assert!(
+                ensure_key_transport_is_safe(url, true, false).is_ok(),
+                "{url} should be treated as loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_merely_containing_localhost_is_not_loopback() {
+        // "localhost.evil.example" resolves wherever the attacker wants.
+        assert!(
+            ensure_key_transport_is_safe("http://localhost.evil.example", true, false).is_err()
+        );
+        assert!(ensure_key_transport_is_safe("http://notlocalhost", true, false).is_err());
+    }
+
+    #[test]
+    fn the_opt_out_allows_plaintext_http() {
+        assert!(ensure_key_transport_is_safe("http://rush.example", true, true).is_ok());
+    }
 
     #[test]
     fn validates_only_http_urls() {
