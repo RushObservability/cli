@@ -19,6 +19,10 @@ pub enum ApiError {
     Unauthorized,
     #[error("Rush denied access to this tenant or operation (403)")]
     Forbidden,
+    #[error(
+        "Rush returned a redirect ({status}); configure the final API URL directly. Redirects are disabled to protect credentials and query data"
+    )]
+    Redirect { status: StatusCode },
     #[error("Rush returned {status}: {message}")]
     Response { status: StatusCode, message: String },
     #[error(
@@ -107,6 +111,7 @@ impl RushClient {
     pub fn new(config: &Config) -> Result<Self, reqwest::Error> {
         Ok(Self {
             http: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(20))
                 .user_agent(concat!("rush-cli/", env!("CARGO_PKG_VERSION")))
@@ -173,6 +178,9 @@ impl RushClient {
         }
         let response = request.send().await?;
         let status = response.status();
+        if status.is_redirection() {
+            return Err(ApiError::Redirect { status });
+        }
         if status == StatusCode::UNAUTHORIZED {
             return Err(ApiError::Unauthorized);
         }
@@ -322,6 +330,48 @@ mod tests {
             poll_interval_ms: 1000,
             window_seconds: 300,
             buffer_size: 5000,
+        }
+    }
+
+    #[tokio::test]
+    async fn redirects_never_forward_credentials_tenant_or_query() {
+        for status in [301, 302, 303, 307, 308] {
+            for same_origin in [false, true] {
+                let source = MockServer::start();
+                let other_origin = MockServer::start();
+                let destination = if same_origin { &source } else { &other_origin };
+                let capture = destination.mock(|when, then| {
+                    when.path("/capture");
+                    then.status(200).json_body(json!({ "rows": [] }));
+                });
+                let redirect = source.mock(|when, then| {
+                    when.method(POST)
+                        .path("/api/v1/logs")
+                        .header("authorization", "Bearer test-key")
+                        .header("x-rush-tenant", "default")
+                        .body_includes("private-query");
+                    then.status(status)
+                        .header("location", destination.url("/capture"));
+                });
+                let spec = QuerySpec {
+                    signal: Signal::Logs,
+                    search: "private-query".into(),
+                    filters: vec![],
+                    window: Duration::from_secs(60),
+                    limit: 1,
+                };
+                let error = RushClient::new(&config(&source))
+                    .unwrap()
+                    .fetch(&spec)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(error, ApiError::Redirect { status: actual } if actual.as_u16() == status)
+                );
+                assert!(error.to_string().contains("final API URL"));
+                redirect.assert();
+                capture.assert_calls(0);
+            }
         }
     }
 
