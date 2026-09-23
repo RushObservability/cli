@@ -39,7 +39,9 @@ impl Pty {
                     &mut slave,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut size,
+                    // macOS takes *mut winsize; Linux takes *const winsize.
+                    // A raw pointer supports both without borrowing mutably on Linux.
+                    &raw mut size,
                 )
             },
             0
