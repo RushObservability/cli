@@ -31,6 +31,14 @@ struct FileConfig {
 
 impl Config {
     pub fn load(cli: &Cli, tail: &TailArgs) -> Result<Self> {
+        Self::load_with_env(cli, tail, env_value)
+    }
+
+    fn load_with_env(
+        cli: &Cli,
+        tail: &TailArgs,
+        env_value: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
         let path = cli.config.clone().or_else(default_config_path);
         let file = match path.as_ref() {
             Some(path) if path.exists() => {
@@ -84,19 +92,19 @@ impl Config {
 
         let poll_interval_ms = tail
             .poll_interval_ms
-            .or_else(|| env_parse("RUSH_POLL_INTERVAL_MS"))
+            .or_else(|| env_value("RUSH_POLL_INTERVAL_MS").and_then(|value| value.parse().ok()))
             .or(file.poll_interval_ms)
             .unwrap_or(1000)
             .clamp(250, 60_000);
         let window_seconds = tail
             .window_seconds
-            .or_else(|| env_parse("RUSH_WINDOW_SECONDS"))
+            .or_else(|| env_value("RUSH_WINDOW_SECONDS").and_then(|value| value.parse().ok()))
             .or(file.window_seconds)
             .unwrap_or(300)
             .clamp(10, 7 * 24 * 60 * 60);
         let buffer_size = tail
             .buffer_size
-            .or_else(|| env_parse("RUSH_BUFFER_SIZE"))
+            .or_else(|| env_value("RUSH_BUFFER_SIZE").and_then(|value| value.parse().ok()))
             .or(file.buffer_size)
             .unwrap_or(5000)
             .clamp(100, 100_000);
@@ -223,10 +231,6 @@ fn parse_insecure_http(value: Option<&str>) -> Result<bool> {
         Some("true" | "1") => Ok(true),
         _ => bail!("RUSH_ALLOW_INSECURE_HTTP must be true, false, 1, or 0"),
     }
-}
-
-fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
-    env_value(name).and_then(|value| value.parse().ok())
 }
 
 fn validate_base_url(value: &str, label: &str) -> Result<()> {
@@ -385,3 +389,7 @@ mod tests {
         assert!(validate_base_url("file:///tmp/socket", "API").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod coverage_tests;

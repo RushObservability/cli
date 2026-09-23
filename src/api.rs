@@ -6,6 +6,10 @@ use serde::Deserialize;
 use serde_json::json;
 use thiserror::Error;
 
+#[cfg(test)]
+#[path = "api_tests.rs"]
+mod coverage_tests;
+
 use crate::{
     config::Config,
     model::{QuerySpec, Signal, TailRecord},

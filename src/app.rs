@@ -98,14 +98,14 @@ impl App {
             self.pending_count += self.pending.len().saturating_sub(before);
             return;
         }
-        let before = self
+        let mut before = self
             .records
             .iter()
             .map(TailRecord::key)
             .collect::<HashSet<_>>();
         self.new_count = records
             .iter()
-            .filter(|record| !before.contains(&record.key()))
+            .filter(|record| before.insert(record.key()))
             .count();
         merge_records(&mut self.records, records, self.buffer_size);
         self.clamp_selection();
@@ -140,11 +140,7 @@ impl App {
             }
             KeyCode::Tab => {
                 self.spec.signal = self.spec.signal.toggled();
-                self.records.clear();
-                self.pending.clear();
-                self.pending_count = 0;
-                self.table_state.select(Some(0));
-                self.refresh();
+                self.query_changed();
                 Action::None
             }
             KeyCode::Char('/') => {
@@ -415,6 +411,112 @@ mod tests {
         };
         let (tx, _) = watch::channel(spec.clone());
         App::new(spec, "http://localhost:5173".into(), 100, tx)
+    }
+
+    #[test]
+    fn duplicate_polls_do_not_inflate_new_count() {
+        let mut app = app();
+        app.receive(vec![record(1), record(1)]);
+        assert_eq!(app.new_count, 1);
+        for _ in 0..5 {
+            app.receive(vec![record(1), record(1)]);
+            assert_eq!(app.new_count, 0);
+            assert_eq!(app.records.len(), 1);
+        }
+        let mut other_service = record(1);
+        other_service.service = "payments".into();
+        app.receive(vec![other_service]);
+        assert_eq!(app.records.len(), 2);
+        assert_eq!(app.new_count, 1);
+    }
+
+    #[test]
+    fn paused_overflow_retains_only_newest_unique_rows() {
+        let mut app = app();
+        app.buffer_size = 3;
+        app.receive(vec![record(0)]);
+        app.toggle_pause();
+        for timestamp in 1..10 {
+            app.receive(vec![record(timestamp), record(timestamp), record(0)]);
+            assert_eq!(app.records[0].timestamp_ns, 0);
+            assert_eq!(app.pending.len(), timestamp.min(3) as usize);
+            assert_eq!(app.pending_count, app.pending.len());
+        }
+        app.toggle_pause();
+        assert_eq!(
+            app.records
+                .iter()
+                .map(|r| r.timestamp_ns)
+                .collect::<Vec<_>>(),
+            vec![9, 8, 7]
+        );
+        assert_eq!(app.new_count, 3);
+        assert!(app.pending.is_empty());
+        assert_eq!(app.pending_count, 0);
+    }
+
+    #[test]
+    fn selection_stays_valid_after_eviction_and_empty_navigation() {
+        let mut app = app();
+        for key in [KeyCode::Down, KeyCode::Up, KeyCode::Home, KeyCode::End] {
+            app.handle_key(KeyEvent::new(key, KeyModifiers::NONE));
+            assert!(app.selected().is_none());
+        }
+        app.receive((0..10).map(record).collect());
+        app.table_state.select(Some(9));
+        app.buffer_size = 2;
+        app.receive(vec![record(11)]);
+        assert_eq!(app.records.len(), 2);
+        assert_eq!(app.table_state.selected(), Some(1));
+        assert!(app.selected().is_some());
+    }
+
+    #[test]
+    fn signal_switch_clears_old_view_and_notifies_poller() {
+        let mut app = app();
+        let mut receiver = app.query_tx.subscribe();
+        app.receive(vec![record(1)]);
+        app.show_detail = true;
+        app.toggle_pause();
+        app.receive(vec![record(2)]);
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(receiver.borrow_and_update().signal, Signal::Apm);
+        assert!(app.records.is_empty() && app.pending.is_empty());
+        assert_eq!(app.new_count, 0);
+        assert_eq!(app.pending_count, 0);
+        assert!(!app.show_detail);
+    }
+
+    #[test]
+    fn invalid_filter_keeps_query_and_escape_cancels_edit() {
+        let mut app = app();
+        let original = app.spec.clone();
+        app.input_mode = InputMode::Filter;
+        app.input = "field=".into();
+        app.input_cursor = app.input.len();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.spec, original);
+        assert!(app.error.is_some());
+        assert_eq!(app.input_mode, InputMode::Normal);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        app.input = "service_name=changed".into();
+        app.input_cursor = app.input.len();
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.spec, original);
+    }
+
+    #[test]
+    fn control_c_quits_even_in_editors_and_help() {
+        for mode in [InputMode::Normal, InputMode::Search, InputMode::Filter] {
+            let mut app = app();
+            app.input_mode = mode;
+            app.show_help = true;
+            assert!(matches!(
+                app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                Action::Quit
+            ));
+        }
     }
 
     #[test]
