@@ -2118,6 +2118,7 @@ dependencies = [
  "directories",
  "futures-util",
  "httpmock",
+ "libc",
  "open",
  "predicates",
  "ratatui",

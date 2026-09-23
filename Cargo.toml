@@ -36,6 +36,9 @@ httpmock = "0.8"
 predicates = "3.1"
 tempfile = "3.19"
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [profile.release]
 lto = "thin"
 strip = true

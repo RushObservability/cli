@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod coverage_tests;
+
 #[derive(Debug, Clone, Copy, Default, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Signal {
@@ -46,14 +50,25 @@ impl fmt::Display for Filter {
             .value
             .as_str()
             .map(|value| {
-                if value.chars().any(char::is_whitespace) {
-                    format!("\"{value}\"")
+                if value.is_empty()
+                    || value
+                        .chars()
+                        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'))
+                    || value.parse::<i64>().is_ok()
+                    || value.eq_ignore_ascii_case("true")
+                    || value.eq_ignore_ascii_case("false")
+                {
+                    serde_json::to_string(value).expect("strings are JSON serializable")
                 } else {
                     value.to_string()
                 }
             })
             .unwrap_or_else(|| self.value.to_string());
-        write!(f, "{}{}{}", self.field, self.op, value)
+        if self.op.ends_with("LIKE") {
+            write!(f, "{} {} {}", self.field, self.op, value)
+        } else {
+            write!(f, "{}{}{}", self.field, self.op, value)
+        }
     }
 }
 
@@ -61,40 +76,46 @@ impl FromStr for Filter {
     type Err = anyhow::Error;
 
     fn from_str(input: &str) -> Result<Self> {
-        for op in [" NOT LIKE ", " LIKE ", "!=", ">=", "<=", "=", ">", "<", "~"] {
-            if let Some((field, raw)) = input.split_once(op) {
-                let field = field.trim();
-                let raw = raw.trim();
-                if field.is_empty() || raw.is_empty() {
-                    bail!("filter must include a field and value: {input}")
-                }
-                let (op, value) = if op == "~" {
-                    ("LIKE".to_string(), Value::String(format!("%{raw}%")))
-                } else {
-                    (op.trim().to_string(), parse_value(raw))
-                };
-                return Ok(Self {
-                    field: field.to_string(),
-                    op,
-                    value,
-                });
+        // Pick the first operator in the expression, not an operator in its value.
+        if let Some((index, op)) = [" NOT LIKE ", " LIKE ", "!=", ">=", "<=", "=", ">", "<", "~"]
+            .into_iter()
+            .filter_map(|op| input.find(op).map(|index| (index, op)))
+            .min_by_key(|(index, _)| *index)
+        {
+            let (field, rest) = input.split_at(index);
+            let raw = &rest[op.len()..];
+            let field = field.trim();
+            let raw = raw.trim();
+            if field.is_empty() || raw.is_empty() {
+                bail!("filter must include a field and value: {input}")
             }
+            let (op, value) = if op == "~" {
+                ("LIKE".to_string(), Value::String(format!("%{raw}%")))
+            } else {
+                (op.trim().to_string(), parse_value(raw)?)
+            };
+            return Ok(Self {
+                field: field.to_string(),
+                op,
+                value,
+            });
         }
         bail!("invalid filter `{input}`; try service_name=gateway or duration_ns>=100000000")
     }
 }
 
-fn parse_value(raw: &str) -> Value {
-    let raw = if raw.len() >= 2
-        && ((raw.starts_with('"') && raw.ends_with('"'))
-            || (raw.starts_with('\'') && raw.ends_with('\'')))
-    {
-        &raw[1..raw.len() - 1]
-    } else {
-        raw
-    };
+fn parse_value(raw: &str) -> Result<Value> {
+    if raw.starts_with('"') {
+        return Ok(Value::String(serde_json::from_str::<String>(raw)?));
+    }
+    if raw.starts_with('\'') {
+        if raw.len() < 2 || !raw.ends_with('\'') {
+            bail!("unterminated quoted filter value")
+        }
+        return Ok(Value::String(raw[1..raw.len() - 1].to_string()));
+    }
 
-    if raw.eq_ignore_ascii_case("true") {
+    Ok(if raw.eq_ignore_ascii_case("true") {
         Value::Bool(true)
     } else if raw.eq_ignore_ascii_case("false") {
         Value::Bool(false)
@@ -102,7 +123,7 @@ fn parse_value(raw: &str) -> Value {
         Value::Number(number.into())
     } else {
         Value::String(raw.to_string())
-    }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,32 +155,30 @@ pub fn parse_search_input(input: &str) -> (Vec<Filter>, String) {
     let mut filters = Vec::new();
     let mut text = Vec::new();
     let mut chars = input.char_indices().peekable();
+    let mut tokens = Vec::new();
 
     while let Some((start, character)) = chars.next() {
         if character.is_whitespace() {
             continue;
         }
 
-        if character == '"' {
-            let mut end = input.len();
-            for (index, next) in chars.by_ref() {
-                end = index + next.len_utf8();
-                if next == '"' {
-                    break;
-                }
-            }
-            text.push(input[start..end].to_string());
-            continue;
-        }
-
         let mut end = start + character.len_utf8();
-        let mut quote = None;
+        let mut quote = matches!(character, '"' | '\'').then_some(character);
+        let mut escaped = false;
         while let Some(&(index, next)) = chars.peek() {
             if quote.is_none() && next.is_whitespace() {
                 break;
             }
             chars.next();
             end = index + next.len_utf8();
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if quote == Some('"') && next == '\\' {
+                escaped = true;
+                continue;
+            }
             match quote {
                 Some(open) if next == open => quote = None,
                 None if next == '"' || next == '\'' => quote = Some(next),
@@ -167,14 +186,40 @@ pub fn parse_search_input(input: &str) -> (Vec<Filter>, String) {
             }
         }
 
-        let token = &input[start..end];
-        if token.eq_ignore_ascii_case("AND") || token.eq_ignore_ascii_case("OR") {
+        tokens.push(&input[start..end]);
+    }
+
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index];
+        let op_len = if tokens.get(index + 1) == Some(&"LIKE") {
+            1
+        } else if tokens.get(index + 1) == Some(&"NOT") && tokens.get(index + 2) == Some(&"LIKE") {
+            2
+        } else {
+            0
+        };
+        if !token.starts_with(['"', '\'']) && op_len > 0 && index + op_len + 1 < tokens.len() {
+            if let Ok(filter) = tokens[index..=index + op_len + 1]
+                .join(" ")
+                .parse::<Filter>()
+            {
+                filters.push(filter);
+                index += op_len + 2;
+                continue;
+            }
+        }
+        if token.starts_with(['"', '\''])
+            || token.eq_ignore_ascii_case("AND")
+            || token.eq_ignore_ascii_case("OR")
+        {
             text.push(token.to_string());
         } else if let Ok(filter) = token.parse::<Filter>() {
             filters.push(filter);
         } else {
             text.push(token.to_string());
         }
+        index += 1;
     }
 
     (filters, text.join(" "))
@@ -201,10 +246,7 @@ pub struct TailRecord {
 
 impl TailRecord {
     pub fn key(&self) -> String {
-        format!(
-            "{}:{}:{}:{}:{}",
-            self.signal, self.timestamp_ns, self.trace_id, self.span_id, self.summary
-        )
+        serde_json::to_string(self).expect("tail records are JSON serializable")
     }
 
     pub fn timestamp(&self) -> String {

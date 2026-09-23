@@ -5,6 +5,11 @@ mod config;
 mod model;
 mod ui;
 
+#[cfg(test)]
+mod poll_tests;
+#[cfg(test)]
+mod test_support;
+
 use std::{
     collections::{HashSet, VecDeque},
     io::{self, IsTerminal, Write},
@@ -30,6 +35,25 @@ use tokio::sync::{mpsc, watch};
 enum PollEvent {
     Records(Vec<TailRecord>),
     Error(String),
+}
+
+#[derive(Debug)]
+struct PollUpdate {
+    spec: QuerySpec,
+    event: PollEvent,
+}
+
+impl PollUpdate {
+    fn apply(self, app: &mut App) {
+        // A response can already be queued when the user edits the query.
+        if self.spec != app.spec {
+            return;
+        }
+        match self.event {
+            PollEvent::Records(records) => app.receive(records),
+            PollEvent::Error(error) => app.fail(error),
+        }
+    }
 }
 
 struct TerminalGuard;
@@ -144,8 +168,11 @@ async fn run_json(client: RushClient, spec: QuerySpec, config: &config::Config) 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
-            _ = interval.tick() => {
-                match client.fetch(&spec).await {
+            result = async {
+                interval.tick().await;
+                client.fetch(&spec).await
+            } => {
+                match result {
                     Ok(records) => {
                         for record in records.into_iter().rev() {
                             let key = record.key();
@@ -207,7 +234,7 @@ async fn run_tui(client: RushClient, spec: QuerySpec, config: &config::Config) -
 async fn tui_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    poll_rx: &mut mpsc::Receiver<PollEvent>,
+    poll_rx: &mut mpsc::Receiver<PollUpdate>,
 ) -> Result<()> {
     let mut events = EventStream::new();
     loop {
@@ -234,8 +261,7 @@ async fn tui_loop(
             }
             update = poll_rx.recv() => {
                 match update {
-                    Some(PollEvent::Records(records)) => app.receive(records),
-                    Some(PollEvent::Error(error)) => app.fail(error),
+                    Some(update) => update.apply(app),
                     None => return Ok(()),
                 }
             }
@@ -246,20 +272,37 @@ async fn tui_loop(
 async fn poll(
     client: RushClient,
     mut query_rx: watch::Receiver<QuerySpec>,
-    poll_tx: mpsc::Sender<PollEvent>,
+    poll_tx: mpsc::Sender<PollUpdate>,
     poll_interval_ms: u64,
 ) {
     loop {
-        let spec = query_rx.borrow().clone();
-        let update = match client.fetch(&spec).await {
+        let spec = query_rx.borrow_and_update().clone();
+        let result = tokio::select! {
+            biased;
+            changed = query_rx.changed() => {
+                if changed.is_err() { return; }
+                continue;
+            }
+            _ = poll_tx.closed() => return,
+            result = client.fetch(&spec) => result,
+        };
+        let event = match result {
             Ok(records) => PollEvent::Records(records),
             Err(error) => PollEvent::Error(error.to_string()),
         };
-        if poll_tx.send(update).await.is_err() {
-            return;
+        tokio::select! {
+            biased;
+            changed = query_rx.changed() => {
+                if changed.is_err() { return; }
+                continue;
+            }
+            result = poll_tx.send(PollUpdate { spec, event }) => {
+                if result.is_err() { return; }
+            }
         }
 
         tokio::select! {
+            _ = poll_tx.closed() => return,
             _ = tokio::time::sleep(Duration::from_millis(poll_interval_ms)) => {}
             changed = query_rx.changed() => {
                 if changed.is_err() {

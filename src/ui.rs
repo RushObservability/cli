@@ -411,6 +411,13 @@ fn wrap_message(message: &str, width: usize, max_lines: usize) -> Vec<String> {
         }
 
         let character_width = character.width().unwrap_or(0);
+        // A wide glyph cannot fit in a one-column pane. Keep the row bounded.
+        let character = if character_width > width {
+            '�'
+        } else {
+            character
+        };
+        let character_width = character.width().unwrap_or(0);
         if line_width > 0 && line_width + character_width > width {
             lines.push(line.trim_end().to_string());
             line.clear();
@@ -487,6 +494,86 @@ mod tests {
     use crate::model::{QuerySpec, Signal};
 
     use super::*;
+
+    fn populated_app() -> App {
+        let spec = crate::test_support::spec();
+        let (tx, _) = watch::channel(spec.clone());
+        let mut app = App::new(spec, "http://localhost:5173".into(), 100, tx);
+        app.receive(vec![crate::test_support::record()]);
+        app
+    }
+
+    fn render(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn populated_error_detail_and_help_views_show_expected_content() {
+        let mut app = populated_app();
+        let text = render(&mut app, 180, 40);
+        for expected in ["gateway", "ERROR", "日", "本", "語", "request failed"] {
+            assert!(text.contains(expected), "missing {expected}");
+        }
+        app.show_detail = true;
+        let text = render(&mut app, 180, 40);
+        assert!(text.contains("trace-123"));
+        assert!(text.contains("span-123"));
+        app.fail("test API failure".into());
+        assert!(render(&mut app, 180, 40).contains("test API failure"));
+        app.show_help = true;
+        assert!(render(&mut app, 180, 40).contains("quit"));
+    }
+
+    #[test]
+    fn all_view_states_render_at_small_and_responsive_sizes() {
+        for (width, height) in [(0, 0), (1, 1), (10, 3), (40, 10), (119, 20), (120, 20)] {
+            for state in 0..6 {
+                let mut app = populated_app();
+                match state {
+                    0 => app.records.clear(),
+                    1 => app.show_detail = true,
+                    2 => app.show_help = true,
+                    3 => app.fail("API unavailable".into()),
+                    4 => {
+                        app.input_mode = crate::app::InputMode::Search;
+                        app.input = "日本語 🚨".into();
+                        app.input_cursor = app.input.len();
+                    }
+                    _ => {
+                        app.paused = true;
+                        app.stream_wrap = true;
+                    }
+                }
+                render(&mut app, width, height);
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_wrapping_obeys_display_width_and_line_limit() {
+        for width in [1, 2, 3, 8, 20] {
+            let lines = wrap_message("日本語 🚨 e\u{301} request\nfailed", width, 3);
+            assert!(lines.len() <= 3);
+            for line in lines {
+                assert!(
+                    UnicodeWidthStr::width(line.as_str()) <= width,
+                    "{line:?} exceeds {width}"
+                );
+            }
+        }
+        assert!(wrap_message("hello", 0, 3).is_empty());
+        assert!(wrap_message("hello", 10, 0).is_empty());
+    }
 
     #[test]
     fn formats_durations_at_readable_units() {
