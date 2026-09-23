@@ -82,3 +82,58 @@ fn tail_rejects_an_unknown_signal() {
         .code(2)
         .stderr(contains("notasignal"));
 }
+
+#[test]
+fn config_errors_do_not_expose_secrets() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    for contents in [
+        "api_key = \"review-dummy-secret\" unexpected\n",
+        "api_key = \"review-dummy-secret\n",
+        "buffer_size = \"review-dummy-secret\"\n",
+        "api_key = [\"review-dummy-secret\"]\n",
+    ] {
+        std::fs::write(&path, contents).unwrap();
+        rush()
+            .arg("--config")
+            .arg(&path)
+            .args(["tail", "--output", "json"])
+            .assert()
+            .failure()
+            .stderr(contains("invalid config"))
+            .stderr(contains("line 1, column"))
+            .stderr(predicates::prelude::PredicateBooleanExt::not(contains(
+                "review-dummy-secret",
+            )));
+    }
+}
+
+#[test]
+fn insecure_http_environment_values_are_respected() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "api_key = \"review-dummy-secret\"\nurl = \"http://example.invalid\"\n",
+    )
+    .unwrap();
+    for (value, expected) in [
+        ("false", "refusing to send the API key over plaintext HTTP"),
+        ("0", "refusing to send the API key over plaintext HTTP"),
+        ("true", "TUI output requires a terminal"),
+        ("1", "TUI output requires a terminal"),
+        ("typo", "RUSH_ALLOW_INSECURE_HTTP must be"),
+    ] {
+        // Captured stdout makes TUI mode exit before any network request.
+        rush()
+            .env_remove("RUSH_URL")
+            .env_remove("RUSH_API_KEY")
+            .env("RUSH_ALLOW_INSECURE_HTTP", value)
+            .arg("--config")
+            .arg(&path)
+            .arg("tail")
+            .assert()
+            .failure()
+            .stderr(contains(expected));
+    }
+}

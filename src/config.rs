@@ -36,8 +36,19 @@ impl Config {
             Some(path) if path.exists() => {
                 let text = fs::read_to_string(path)
                     .with_context(|| format!("failed to read config {}", path.display()))?;
-                toml::from_str::<FileConfig>(&text)
-                    .with_context(|| format!("invalid config {}", path.display()))?
+                toml::from_str::<FileConfig>(&text).map_err(|error| {
+                    // TOML diagnostics include source text and may expose an API key.
+                    // Keep only the location, never the original error or its source chain.
+                    let offset = error.span().map(|span| span.start).unwrap_or(0);
+                    let prefix = &text.as_bytes()[..offset.min(text.len())];
+                    let line = prefix.iter().filter(|&&byte| byte == b'\n').count() + 1;
+                    let column = prefix.iter().rposition(|&byte| byte == b'\n')
+                        .map_or(prefix.len() + 1, |index| prefix.len() - index);
+                    anyhow::anyhow!(
+                        "invalid config {} at line {line}, column {column}; check TOML syntax and value types",
+                        path.display()
+                    )
+                })?
             }
             Some(path) if cli.config.is_some() => {
                 bail!("config file does not exist: {}", path.display())
@@ -68,7 +79,7 @@ impl Config {
         ensure_key_transport_is_safe(
             &url,
             api_key.is_some(),
-            env_value("RUSH_ALLOW_INSECURE_HTTP").is_some(),
+            parse_insecure_http(env_value("RUSH_ALLOW_INSECURE_HTTP").as_deref())?,
         )?;
 
         let poll_interval_ms = tail
@@ -206,6 +217,14 @@ fn env_value(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
 }
 
+fn parse_insecure_http(value: Option<&str>) -> Result<bool> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("" | "false" | "0") => Ok(false),
+        Some("true" | "1") => Ok(true),
+        _ => bail!("RUSH_ALLOW_INSECURE_HTTP must be true, false, 1, or 0"),
+    }
+}
+
 fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
     env_value(name).and_then(|value| value.parse().ok())
 }
@@ -226,6 +245,30 @@ pub fn default_config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insecure_http_requires_explicit_true() {
+        for value in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("false"),
+            Some("FALSE"),
+            Some("0"),
+        ] {
+            assert!(!parse_insecure_http(value).unwrap());
+        }
+        for value in ["true", "TRUE", "1", " true "] {
+            assert!(parse_insecure_http(Some(value)).unwrap());
+        }
+        for value in ["yes", "no", "2", "tru", "dummy-secret"] {
+            let error = parse_insecure_http(Some(value)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "RUSH_ALLOW_INSECURE_HTTP must be true, false, 1, or 0"
+            );
+        }
+    }
 
     #[test]
     fn owner_only_modes_are_not_flagged() {
