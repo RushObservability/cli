@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use support::{Process, Response, Server, command};
 
 fn rows(timestamps: &[i64]) -> String {
-    json!({"rows": timestamps.iter().map(|timestamp| json!({"Timestamp":timestamp,"ServiceName":"gateway","Body":format!("row-{timestamp}")})).collect::<Vec<_>>()}).to_string()
+    json!({"version":"v1","signal":"logs","operation":"search","data":{"rows": timestamps.iter().map(|timestamp| json!({"Timestamp":timestamp,"ServiceName":"gateway","Body":format!("row-{timestamp}")})).collect::<Vec<_>>()}}).to_string()
 }
 
 #[test]
@@ -53,7 +53,7 @@ fn json_tail_polls_deduplicates_recovers_and_sends_query_contract() {
     let requests: Vec<_> = server.requests.try_iter().collect();
     assert_eq!(requests.len(), 5);
     for request in requests {
-        assert!(request.starts_with("POST /api/v1/logs HTTP/1.1"));
+        assert!(request.starts_with("POST /api/v1/query/execute HTTP/1.1"));
         assert!(
             request
                 .to_lowercase()
@@ -65,8 +65,11 @@ fn json_tail_polls_deduplicates_recovers_and_sends_query_contract() {
                 .contains("x-rush-tenant: test-tenant")
         );
         let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(body["limit"], 25);
-        assert_eq!(body["slim"], true);
+        assert_eq!(body["version"], "v1");
+        assert_eq!(body["signal"], "logs");
+        assert_eq!(body["operation"], "search");
+        assert_eq!(body["options"]["limit"], 25);
+        assert_eq!(body["options"]["slim"], true);
         assert_eq!(body["search"], "timeout");
         assert_eq!(body["filters"].as_array().unwrap().len(), 2);
         let from =
@@ -97,7 +100,7 @@ fn json_tail_exits_on_both_auth_failures_without_retry() {
 
 #[test]
 fn json_tail_apm_maps_http_fields_and_severity() {
-    let server = Server::start(vec![Response::new(200,json!({"rows":[{"timestamp":42,"service_name":"payments","span_name":"request","http_method":"POST","http_path":"/pay","http_status_code":503,"duration_ns":1000,"trace_id":"trace","span_id":"span"}]}).to_string()),Response::new(403,"")]);
+    let server = Server::start(vec![Response::new(200,json!({"version":"v1","signal":"spans","operation":"search","data":{"rows":[{"timestamp":42,"service_name":"payments","span_name":"request","http_method":"POST","http_path":"/pay","http_status_code":503,"duration_ns":1000,"trace_id":"trace","span_id":"span"}]}}).to_string()),Response::new(403,"")]);
     let (mut cmd, _directory) = command(&server.url);
     let output = Process(cmd.args(["apm", "--output", "json"]).spawn().unwrap()).output();
     let row: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -111,7 +114,7 @@ fn json_tail_apm_maps_http_fields_and_severity() {
         server
             .requests
             .try_iter()
-            .all(|request| request.starts_with("POST /api/v1/query "))
+            .all(|request| request.starts_with("POST /api/v1/query/execute "))
     );
 }
 
