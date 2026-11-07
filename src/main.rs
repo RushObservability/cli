@@ -3,6 +3,7 @@ mod app;
 mod cli;
 mod config;
 mod model;
+mod query_contract;
 mod ui;
 
 #[cfg(test)]

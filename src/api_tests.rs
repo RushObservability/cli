@@ -77,7 +77,7 @@ async fn minimal_rows_and_empty_results_are_valid() {
             let server = MockServer::start();
             server.mock(|when, then| {
                 when.method(POST);
-                then.status(200).json_body(json!({"rows":rows}));
+                then.status(200).json_body(json!({"version":"v1","signal":if signal == Signal::Logs {"logs"} else {"spans"},"operation":"search","data":{"rows":rows}}));
             });
             let mut query = spec();
             query.signal = signal;
