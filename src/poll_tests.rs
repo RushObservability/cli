@@ -16,21 +16,17 @@ async fn query_switch_cancels_slow_fetch_for_search_and_signal() {
         let server = MockServer::start();
         let slow = server.mock(|when, then| {
             when.method(POST)
-                .path("/api/v1/logs")
+                .path("/api/v1/query/execute")
                 .body_includes("old-query");
-            then.status(200)
-                .delay(Duration::from_secs(10))
-                .json_body(json!({"rows":[]}));
+            then.status(200).delay(Duration::from_secs(10)).json_body(
+                json!({"version":"v1","signal":"logs","operation":"search","data":{"rows":[]}}),
+            );
         });
         let fresh = server.mock(|when, then| {
             when.method(POST)
-                .path(if signal == model::Signal::Logs {
-                    "/api/v1/logs"
-                } else {
-                    "/api/v1/query"
-                })
+                .path("/api/v1/query/execute")
                 .body_includes("new-query");
-            then.status(200).json_body(json!({"rows":[]}));
+            then.status(200).json_body(json!({"version":"v1","signal":if signal == model::Signal::Logs {"logs"} else {"spans"},"operation":"search","data":{"rows":[]}}));
         });
         let mut old = spec();
         old.search = "old-query".into();
@@ -114,7 +110,9 @@ async fn poll_recovers_after_error_and_stops_when_consumer_closes() {
     failure.delete();
     server.mock(|when, then| {
         when.method(POST);
-        then.status(200).json_body(json!({"rows":[]}));
+        then.status(200).json_body(
+            json!({"version":"v1","signal":"logs","operation":"search","data":{"rows":[]}}),
+        );
     });
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {

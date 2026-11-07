@@ -172,11 +172,20 @@ impl RushClient {
         path: &str,
         body: &serde_json::Value,
     ) -> Result<T, ApiError> {
+        let unified = crate::query_contract::adapt(path, body);
         let mut request = self
             .http
-            .post(format!("{}{}", self.base_url, path))
+            .post(format!(
+                "{}{}",
+                self.base_url,
+                if unified.is_some() {
+                    crate::query_contract::ENDPOINT
+                } else {
+                    path
+                }
+            ))
             .header("X-Rush-Tenant", &self.tenant)
-            .json(body);
+            .json(unified.as_ref().unwrap_or(body));
         if let Some(key) = self.api_key.as_deref() {
             request = request.bearer_auth(key);
         }
@@ -200,7 +209,13 @@ impl RushClient {
                 .unwrap_or_else(|| "request failed".to_string());
             let message = serde_json::from_str::<serde_json::Value>(&message)
                 .ok()
-                .and_then(|value| value.get("message")?.as_str().map(str::to_string))
+                .and_then(|value| {
+                    value
+                        .pointer("/error/message")
+                        .or_else(|| value.get("message"))?
+                        .as_str()
+                        .map(str::to_string)
+                })
                 .map(|text| sanitise_server_text(&text))
                 // An all-control-character message sanitises to nothing, so
                 // fall back rather than printing an empty reason.
@@ -209,7 +224,12 @@ impl RushClient {
             return Err(ApiError::Response { status, message });
         }
         let body = read_body_capped(response, MAX_RESPONSE_BYTES).await?;
-        serde_json::from_slice(&body).map_err(|error| ApiError::Response {
+        (if let Some(request) = unified {
+            crate::query_contract::decode(&body, &request)
+        } else {
+            serde_json::from_slice(&body)
+        })
+        .map_err(|error| ApiError::Response {
             status,
             message: format!("could not parse the response: {error}"),
         })
@@ -350,7 +370,7 @@ mod tests {
                 });
                 let redirect = source.mock(|when, then| {
                     when.method(POST)
-                        .path("/api/v1/logs")
+                        .path("/api/v1/query/execute")
                         .header("authorization", "Bearer test-key")
                         .header("x-rush-tenant", "default")
                         .body_includes("private-query");
@@ -434,9 +454,9 @@ mod tests {
     async fn escape_sequences_in_a_server_error_never_reach_the_caller() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/api/v1/logs");
+            when.method(POST).path("/api/v1/query/execute");
             then.status(500).json_body(json!({
-                "message": "\u{1b}[2Jboom\nrush: forged line"
+                "error": {"code":"internal_error", "message": "\u{1b}[2Jboom\nrush: forged line", "request_id":"test"}
             }));
         });
         let spec = QuerySpec {
@@ -538,27 +558,29 @@ mod tests {
         let server = MockServer::start();
         let request = server.mock(|when, then| {
             when.method(POST)
-                .path("/api/v1/logs")
+                .path("/api/v1/query/execute")
                 .header("authorization", "Bearer test-key")
                 .header("x-rush-tenant", "default")
                 .body_includes("\"search\":\"panic\"")
                 .body_includes("\"slim\":true");
-            then.status(200).json_body(json!({
-                "rows": [{
-                    "Timestamp": 1_700_000_000_000_000_000_i64,
-                    "TraceId": "trace-1",
-                    "SpanId": "span-1",
-                    "SeverityText": "ERROR",
-                    "SeverityNumber": 17,
-                    "ServiceName": "gateway",
-                    "Body": "panic in request",
-                    "TimestampNs": "1700000000000000000",
-                    "BlockNumber": "1",
-                    "BlockOffset": "2",
-                    "BodyHash": "3"
-                }],
-                "total": 1
-            }));
+            then.status(200).json_body(
+                json!({"version":"v1","signal":"logs","operation":"search","data":{
+                    "rows": [{
+                        "Timestamp": 1_700_000_000_000_000_000_i64,
+                        "TraceId": "trace-1",
+                        "SpanId": "span-1",
+                        "SeverityText": "ERROR",
+                        "SeverityNumber": 17,
+                        "ServiceName": "gateway",
+                        "Body": "panic in request",
+                        "TimestampNs": "1700000000000000000",
+                        "BlockNumber": "1",
+                        "BlockOffset": "2",
+                        "BodyHash": "3"
+                    }],
+                    "total": 1
+                }}),
+            );
         });
         let spec = QuerySpec {
             signal: Signal::Logs,
@@ -585,24 +607,26 @@ mod tests {
         let server = MockServer::start();
         let request = server.mock(|when, then| {
             when.method(POST)
-                .path("/api/v1/query")
+                .path("/api/v1/query/execute")
                 .body_includes("\"columns\":\"list\"")
                 .body_includes("\"field\":\"service_name\"");
-            then.status(200).json_body(json!({
-                "rows": [{
-                    "timestamp": 1_700_000_000_000_000_000_i64,
-                    "service_name": "articles",
-                    "span_name": "GET /articles",
-                    "http_method": "GET",
-                    "http_path": "/articles",
-                    "http_status_code": 200,
-                    "duration_ns": 25_000_000,
-                    "status": "ok",
-                    "trace_id": "trace-2",
-                    "span_id": "span-2"
-                }],
-                "total": 1
-            }));
+            then.status(200).json_body(
+                json!({"version":"v1","signal":"spans","operation":"search","data":{
+                    "rows": [{
+                        "timestamp": 1_700_000_000_000_000_000_i64,
+                        "service_name": "articles",
+                        "span_name": "GET /articles",
+                        "http_method": "GET",
+                        "http_path": "/articles",
+                        "http_status_code": 200,
+                        "duration_ns": 25_000_000,
+                        "status": "ok",
+                        "trace_id": "trace-2",
+                        "span_id": "span-2"
+                    }],
+                    "total": 1
+                }}),
+            );
         });
         let spec = QuerySpec {
             signal: Signal::Apm,
@@ -628,7 +652,7 @@ mod tests {
     async fn maps_unauthorized_responses_to_actionable_error() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/api/v1/logs");
+            when.method(POST).path("/api/v1/query/execute");
             then.status(401);
         });
         let spec = QuerySpec {
