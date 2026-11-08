@@ -5,8 +5,9 @@ spans, applies server-side searches and structured filters, lets you freeze the
 screen without losing incoming records, and opens the selected record in the
 Rush web UI.
 
-The first release uses Rush's existing bounded query APIs and polls a sliding
-time window. It does not require a new streaming endpoint in `query-api`.
+It polls a sliding time window through Rush's versioned query endpoint,
+`/api/v1/query/execute`, so it needs `query-api` v0.1.11 or later. It does not
+need a streaming endpoint.
 
 ## Features
 
