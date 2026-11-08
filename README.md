@@ -35,19 +35,14 @@ For local development from a checkout, use `cargo install --path .`.
 
 ### Releases
 
-Pushing a version tag builds release archives for Linux x86_64, macOS Intel,
-macOS Apple Silicon, and Windows x86_64, then publishes them with SHA-256
-checksums to a GitHub Release. The tag must match the package version in
-`Cargo.toml`.
+To release, bump `version` in `Cargo.toml` (and `Cargo.lock`, with
+`cargo update -p rush-cli --offline`) in a pull request. Merging it to `main`
+tags `v<version>`, builds archives for Linux x86_64, macOS Intel, macOS Apple
+Silicon, and Windows x86_64, and publishes them with SHA-256 checksums to a
+GitHub Release. A `Cargo.toml` change that keeps a released version publishes
+nothing.
 
-```bash
-# Cargo.toml version = "0.1.0"
-git tag -a v0.1.0 -m "rush v0.1.0"
-git push origin v0.1.0
-```
-
-To retry an existing tag without moving it, run
-`gh workflow run release.yml --ref main -f tag=v0.1.0`.
+To retry a release that failed, run `gh workflow run release.yml --ref main`.
 
 ## Authentication
 
