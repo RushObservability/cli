@@ -6,7 +6,7 @@ screen without losing incoming records, and opens the selected record in the
 Rush web UI.
 
 It polls a sliding time window through Rush's versioned query endpoint,
-`/api/v1/query/execute`, so it needs `query-api` v0.1.11 or later. It does not
+`/api/v1/query/execute`, so it needs `query-api` v0.1.12 or later. It does not
 need a streaming endpoint.
 
 ## Features
