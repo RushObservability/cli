@@ -2,6 +2,7 @@ name: Rust CI
 
 on:
   pull_request: {}
+  merge_group:
   # Also run on main. Without this, a merge-order interaction between two
   # independently-green PRs lands untested.
   push:
