@@ -3,7 +3,7 @@
 CARGO ?= cargo
 ARGS ?=
 
-.PHONY: help fmt fmt-check check lint test build release release-audit ci install run-logs run-apm clean
+.PHONY: help fmt fmt-check check lint test build release ci install run-logs run-apm clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -26,12 +26,10 @@ test: ## Run the test suite
 build: ## Build every target in debug mode
 	$(CARGO) build --locked --all-targets
 
-release: release-audit ## Audit dependencies and build the optimized rush binary
-	$(CARGO) build --locked --release
-
-release-audit: ## Check RustSec advisories with cargo-audit and cargo-deny
+release: ## Audit dependencies and build the optimized rush binary
 	$(CARGO) audit
 	$(CARGO) deny --locked check --hide-inclusion-graph advisories
+	$(CARGO) build --locked --release
 
 ci: fmt-check lint test build ## Run all pull-request checks locally
 
