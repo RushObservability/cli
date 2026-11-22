@@ -54,6 +54,16 @@ jobs:
           echo "release=true" >> "$GITHUB_OUTPUT"
           echo "Releasing ${tag}" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Install dependency scanners
+        if: steps.version.outputs.release == 'true'
+        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+
+      - name: Audit release dependencies
+        if: steps.version.outputs.release == 'true'
+        run: make release-audit
+
       - name: Run tests
         if: steps.version.outputs.release == 'true'
         run: cargo test --locked

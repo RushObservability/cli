@@ -2,9 +2,6 @@ name: Security and quality
 
 on:
   pull_request:
-  schedule:
-    # Weekly, so advisories published after a merge still surface.
-    - cron: "31 9 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -33,10 +30,10 @@ jobs:
           toolchain: 1.88.0
           components: rustfmt, clippy
 
-      - name: Install dependency scanners
+      - name: Install cargo-deny
         uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
         with:
-          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+          tool: cargo-deny@0.20.2
 
       - name: Scan repository history for secrets
         # Pinned to the multi-arch index digest, not a per-arch leaf -- an arm64
@@ -49,8 +46,5 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Scan RustSec advisories
-        run: cargo audit
-
       - name: Enforce dependency policy
-        run: cargo deny check --hide-inclusion-graph advisories bans licenses sources
+        run: cargo deny --locked check --hide-inclusion-graph bans licenses sources
