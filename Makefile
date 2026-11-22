@@ -26,7 +26,9 @@ test: ## Run the test suite
 build: ## Build every target in debug mode
 	$(CARGO) build --locked --all-targets
 
-release: ## Build the optimized rush binary
+release: ## Audit dependencies and build the optimized rush binary
+	$(CARGO) audit
+	$(CARGO) deny --locked check --hide-inclusion-graph advisories
 	$(CARGO) build --locked --release
 
 ci: fmt-check lint test build ## Run all pull-request checks locally
