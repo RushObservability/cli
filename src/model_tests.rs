@@ -117,8 +117,8 @@ fn timestamps_and_context_urls_preserve_boundaries() {
         let url = record.web_url("https://rush.example").unwrap();
         let pairs: std::collections::HashMap<_, _> = url.query_pairs().collect();
         assert_eq!(pairs["log"], timestamp.to_string());
-        let from = DateTime::parse_from_rfc3339(&pairs["from"]).unwrap();
-        let to = DateTime::parse_from_rfc3339(&pairs["to"]).unwrap();
-        assert_eq!((to - from).num_seconds(), 10);
+        let from = pairs["from"].parse::<Timestamp>().unwrap();
+        let to = pairs["to"].parse::<Timestamp>().unwrap();
+        assert_eq!((to - from).as_secs(), 10);
     }
 }

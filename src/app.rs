@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use jiff::Timestamp;
 use ratatui::widgets::TableState;
 use tokio::sync::watch;
 
@@ -37,7 +37,7 @@ pub struct App {
     pub show_help: bool,
     pub stream_wrap: bool,
     pub error: Option<String>,
-    pub last_updated: Option<DateTime<Utc>>,
+    pub last_updated: Option<Timestamp>,
     pub web_url: String,
     pub buffer_size: usize,
     query_tx: watch::Sender<QuerySpec>,
@@ -82,7 +82,7 @@ impl App {
 
     pub fn receive(&mut self, records: Vec<TailRecord>) {
         self.error = None;
-        self.last_updated = Some(Utc::now());
+        self.last_updated = Some(Timestamp::now());
         if self.paused {
             let existing = self
                 .records

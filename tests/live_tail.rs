@@ -72,12 +72,17 @@ fn json_tail_polls_deduplicates_recovers_and_sends_query_contract() {
         assert_eq!(body["options"]["slim"], true);
         assert_eq!(body["search"], "timeout");
         assert_eq!(body["filters"].as_array().unwrap().len(), 2);
-        let from =
-            chrono::DateTime::parse_from_rfc3339(body["time_range"]["from"].as_str().unwrap())
-                .unwrap();
-        let to = chrono::DateTime::parse_from_rfc3339(body["time_range"]["to"].as_str().unwrap())
+        let from = body["time_range"]["from"]
+            .as_str()
+            .unwrap()
+            .parse::<jiff::Timestamp>()
             .unwrap();
-        assert_eq!((to - from).num_seconds(), 90);
+        let to = body["time_range"]["to"]
+            .as_str()
+            .unwrap()
+            .parse::<jiff::Timestamp>()
+            .unwrap();
+        assert_eq!((to - from).as_secs(), 90);
     }
 }
 
