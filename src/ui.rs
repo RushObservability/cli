@@ -54,7 +54,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     };
     let updated = app
         .last_updated
-        .map(|value| value.format("%H:%M:%S").to_string())
+        .map(|value| value.strftime("%H:%M:%S").to_string())
         .unwrap_or_else(|| "connecting".into());
     let title = Line::from(vec![
         Span::styled(

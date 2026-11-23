@@ -1,8 +1,8 @@
 use std::{fmt, str::FromStr, time::Duration};
 
 use anyhow::{Result, bail};
-use chrono::{DateTime, SecondsFormat, Utc};
 use clap::ValueEnum;
+use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -250,11 +250,9 @@ impl TailRecord {
     }
 
     pub fn timestamp(&self) -> String {
-        let seconds = self.timestamp_ns.div_euclid(1_000_000_000);
-        let nanos = self.timestamp_ns.rem_euclid(1_000_000_000) as u32;
-        DateTime::<Utc>::from_timestamp(seconds, nanos)
-            .map(|value| value.format("%H:%M:%S%.3f").to_string())
-            .unwrap_or_else(|| "--:--:--.---".to_string())
+        Timestamp::from_nanosecond(self.timestamp_ns.into())
+            .map(|value| value.strftime("%H:%M:%S%.3f").to_string())
+            .unwrap_or_else(|_| "--:--:--.---".to_string())
     }
 
     pub fn web_url(&self, base: &str) -> Result<Url> {
@@ -266,16 +264,15 @@ impl TailRecord {
         }
 
         url.set_path("/");
-        let seconds = self.timestamp_ns.div_euclid(1_000_000_000);
-        let nanos = self.timestamp_ns.rem_euclid(1_000_000_000) as u32;
-        let target = DateTime::<Utc>::from_timestamp(seconds, nanos).unwrap_or_else(Utc::now);
-        let from = target - chrono::Duration::seconds(5);
-        let to = target + chrono::Duration::seconds(5);
+        let target = Timestamp::from_nanosecond(self.timestamp_ns.into())
+            .unwrap_or_else(|_| Timestamp::now());
+        let from = target - SignedDuration::from_secs(5);
+        let to = target + SignedDuration::from_secs(5);
         url.query_pairs_mut()
             .clear()
             .append_pair("mode", "logs")
-            .append_pair("from", &from.to_rfc3339_opts(SecondsFormat::Millis, true))
-            .append_pair("to", &to.to_rfc3339_opts(SecondsFormat::Millis, true))
+            .append_pair("from", &format!("{from:.3}"))
+            .append_pair("to", &format!("{to:.3}"))
             .append_pair("log", &self.timestamp_ns.to_string());
         Ok(url)
     }

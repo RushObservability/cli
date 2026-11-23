@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use chrono::{SecondsFormat, Utc};
+use jiff::{SignedDuration, Timestamp};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::json;
@@ -127,13 +127,13 @@ impl RushClient {
     }
 
     pub async fn fetch(&self, spec: &QuerySpec) -> Result<Vec<TailRecord>, ApiError> {
-        let now = Utc::now();
-        let from = now
-            - chrono::Duration::from_std(spec.window)
-                .unwrap_or_else(|_| chrono::Duration::minutes(5));
+        let now = Timestamp::now();
+        let window =
+            SignedDuration::try_from(spec.window).unwrap_or(SignedDuration::from_secs(300));
+        let from = now.checked_sub(window).unwrap_or(Timestamp::MIN);
         let time_range = json!({
-            "from": from.to_rfc3339_opts(SecondsFormat::Millis, true),
-            "to": now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "from": format!("{from:.3}"),
+            "to": format!("{now:.3}"),
         });
         let search = (!spec.search.trim().is_empty()).then(|| spec.search.trim());
 
